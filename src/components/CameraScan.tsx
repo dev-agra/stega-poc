@@ -22,9 +22,11 @@ export default function CameraScan({ decodeOpts, onResult }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const cropCanvasRef = useRef<HTMLCanvasElement>(null);
   const warpCanvasRef = useRef<HTMLCanvasElement>(null);
-  const [status, setStatus] = useState<'starting' | 'searching' | 'found-qr' | 'decoded' | 'error'>('starting');
+  const [status, setStatus] = useState<'starting' | 'searching' | 'found-qr' | 'found-invalid' | 'decoded' | 'error'>('starting');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [flash, setFlash] = useState(false);
+  const [invalidAttempts, setInvalidAttempts] = useState(0);
+  const [lastQrText, setLastQrText] = useState<string | null>(null);
   const rafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -136,6 +138,13 @@ export default function CameraScan({ decodeOpts, onResult }: Props) {
           setStatus('decoded');
           onResult(result, qr.data);
           return; // stop scanning once decoded
+        } else {
+          // QR detected and read cleanly, but no valid watermark payload
+          // came out of it -- almost always a seed/coefficient mismatch
+          // (or the QR genuinely wasn't watermarked with this tool).
+          setStatus('found-invalid');
+          setLastQrText(qr.data);
+          setInvalidAttempts((n) => n + 1);
         }
       } else {
         setStatus('searching');
@@ -194,6 +203,7 @@ export default function CameraScan({ decodeOpts, onResult }: Props) {
           {status === 'starting' && 'Starting camera…'}
           {status === 'searching' && 'Align marker within the brackets…'}
           {status === 'found-qr' && 'QR found — reading…'}
+          {status === 'found-invalid' && 'QR read, but no valid payload — reading…'}
           {status === 'decoded' && 'Decoded ✓'}
           {status === 'error' && `Camera error: ${errorMsg}`}
         </div>
@@ -205,6 +215,22 @@ export default function CameraScan({ decodeOpts, onResult }: Props) {
         <p className="text-xs text-neutral-500 mb-1">Aligned/cropped region the decoder is reading:</p>
         <canvas ref={warpCanvasRef} className="border border-neutral-800 rounded w-40 h-40" />
       </div>
+
+      {invalidAttempts >= 5 && (
+        <div className="border border-red-900/50 rounded p-3 bg-red-950/30 text-sm text-red-300">
+          <p className="font-medium">QR detected repeatedly, but never a valid payload.</p>
+          <p className="text-xs text-red-400/80 mt-1">
+            This almost always means the seed / coefficient pair set above doesn&apos;t match what
+            was used to encode this marker — the filename auto-detect feature only works on the
+            Upload path, not Scan, so double-check those values match the encoded filename exactly.
+          </p>
+          {lastQrText && (
+            <p className="text-xs text-neutral-400 mt-2">
+              QR visible text being read: <span className="font-mono">{lastQrText}</span>
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
