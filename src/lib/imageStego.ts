@@ -10,6 +10,27 @@ import {
   type Block8,
 } from './dct';
 import { prepareTxBits, resolveRxBits } from './payloadCodec';
+import { prepareTxBitsRS, resolveRxBitsRS } from './payloadCodecRS';
+
+export type CodecKind = 'bch' | 'rs';
+
+/** Seeded Fisher-Yates shuffle producing a fixed permutation of [0..n-1]. */
+function seededPermutation(n: number, seed: number): number[] {
+  const arr = Array.from({ length: n }, (_, i) => i);
+  let state = seed >>> 0;
+  const rand = () => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
 
 export const CANONICAL_SIZE = 256;
 export const BLOCK_COUNT_PER_SIDE = CANONICAL_SIZE / 8; // 32
@@ -57,6 +78,8 @@ export interface EncodeOptions {
   seed?: number;
   coeff1?: CoeffPos;
   coeff2?: CoeffPos;
+  codec?: CodecKind;
+  interleave?: boolean;
 }
 
 export interface EncodeResult {
@@ -80,6 +103,8 @@ export function encodeImage(input: RgbaImage, secret8: string, opts: EncodeOptio
   const seed = opts.seed ?? DEFAULT_SEED;
   const coeff1 = opts.coeff1 ?? DEFAULT_COEFF_1;
   const coeff2 = opts.coeff2 ?? DEFAULT_COEFF_2;
+  const codec = opts.codec ?? 'bch';
+  const interleave = opts.interleave ?? false;
 
   const { R, G, B, A } = splitChannels(input);
 
@@ -92,11 +117,20 @@ export function encodeImage(input: RgbaImage, secret8: string, opts: EncodeOptio
   const { Y, Cb, Cr } = rgbToYCbCr(R256, G256, B256);
   const Yprime = Float64Array.from(Y);
 
-  // 3. Prepare the BCH+PRNG-masked bitstream to embed.
-  const { txBits, repeats } = prepareTxBits(secret8, TOTAL_BLOCKS, seed);
+  // 3. Prepare the protected bitstream to embed (BCH or RS, matched overhead).
+  const prepared =
+    codec === 'rs' ? prepareTxBitsRS(secret8, TOTAL_BLOCKS, seed) : prepareTxBits(secret8, TOTAL_BLOCKS, seed);
+  const { txBits, repeats } = prepared;
+
+  // Optional interleaving: scatter each codeword's consecutive bits across
+  // spatially distant blocks, so a spatially-localized bad region (e.g. from
+  // perspective distortion) only ever corrupts a few symbols of any given
+  // codeword instead of wiping the whole codeword out at once.
+  const permutation = interleave ? seededPermutation(TOTAL_BLOCKS, seed ^ 0x9e3779b9) : null;
 
   // 4. Per 8x8 block: DCT, embed 1 bit via coefficient-pair ordering, IDCT.
-  for (let blockIdx = 0; blockIdx < txBits.length && blockIdx < TOTAL_BLOCKS; blockIdx++) {
+  for (let bitIdx = 0; bitIdx < txBits.length && bitIdx < TOTAL_BLOCKS; bitIdx++) {
+    const blockIdx = permutation ? permutation[bitIdx] : bitIdx;
     const blockRow = Math.floor(blockIdx / BLOCK_COUNT_PER_SIDE);
     const blockCol = blockIdx % BLOCK_COUNT_PER_SIDE;
     const by = blockRow * 8;
@@ -110,7 +144,7 @@ export function encodeImage(input: RgbaImage, secret8: string, opts: EncodeOptio
     }
 
     const F = dct8x8(block);
-    const bit = txBits[blockIdx] as 0 | 1;
+    const bit = txBits[bitIdx] as 0 | 1;
     const F2 = embedBitInCoeffs(F, bit, coeff1, coeff2, strength);
     const newBlock = idct8x8(F2);
 
@@ -162,6 +196,8 @@ export interface DecodeOptions {
   seed?: number;
   coeff1?: CoeffPos;
   coeff2?: CoeffPos;
+  codec?: CodecKind;
+  interleave?: boolean;
 }
 
 export interface DecodeResult {
@@ -171,11 +207,13 @@ export interface DecodeResult {
   totalBitErrorsCorrected: number;
 }
 
-/** Decode: any-resolution RGBA in -> downsample to canonical grid -> extract + BCH-recover. */
+/** Decode: any-resolution RGBA in -> downsample to canonical grid -> extract + BCH/RS-recover. */
 export function decodeImage(input: RgbaImage, opts: DecodeOptions = {}): DecodeResult {
   const seed = opts.seed ?? DEFAULT_SEED;
   const coeff1 = opts.coeff1 ?? DEFAULT_COEFF_1;
   const coeff2 = opts.coeff2 ?? DEFAULT_COEFF_2;
+  const codec = opts.codec ?? 'bch';
+  const interleave = opts.interleave ?? false;
 
   const { R, G, B } = splitChannels(input);
   const R256 = resizeBilinear(R, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
@@ -183,8 +221,11 @@ export function decodeImage(input: RgbaImage, opts: DecodeOptions = {}): DecodeR
   const B256 = resizeBilinear(B, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
   const { Y } = rgbToYCbCr(R256, G256, B256);
 
+  const permutation = interleave ? seededPermutation(TOTAL_BLOCKS, seed ^ 0x9e3779b9) : null;
+
   const rxBits: number[] = [];
-  for (let blockIdx = 0; blockIdx < TOTAL_BLOCKS; blockIdx++) {
+  for (let bitIdx = 0; bitIdx < TOTAL_BLOCKS; bitIdx++) {
+    const blockIdx = permutation ? permutation[bitIdx] : bitIdx;
     const blockRow = Math.floor(blockIdx / BLOCK_COUNT_PER_SIDE);
     const blockCol = blockIdx % BLOCK_COUNT_PER_SIDE;
     const by = blockRow * 8;
@@ -200,6 +241,12 @@ export function decodeImage(input: RgbaImage, opts: DecodeOptions = {}): DecodeR
     rxBits.push(extractBitFromCoeffs(F, coeff1, coeff2));
   }
 
-  const resolved = resolveRxBits(rxBits, seed);
+  const resolved =
+    codec === 'rs'
+      ? (() => {
+          const r = resolveRxBitsRS(rxBits, seed);
+          return { message: r.message, validCopies: r.validCopies, totalCopies: r.totalCopies, totalBitErrorsCorrected: r.totalSymbolErrorsCorrected };
+        })()
+      : resolveRxBits(rxBits, seed);
   return resolved;
 }
