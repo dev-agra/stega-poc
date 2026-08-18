@@ -24,20 +24,18 @@ export default function CoeffGridSelector({ coeff1, coeff2, onChange }: Props) {
 
   return (
     <div>
-      <p className="text-sm text-red-500 font-semibold mb-2 tracking-wide uppercase">
-        Select DCT Coefficient Pair
-      </p>
-      <p className="text-xs text-neutral-400 mb-3">
+      <p className="text-sm font-medium text-neutral-200 mb-2">DCT coefficient pair</p>
+      <p className="text-xs text-neutral-500 mb-3">
         Click cells to set{' '}
-        <span className="inline-block px-2 py-0.5 rounded bg-red-600 text-white font-mono text-xs">
+        <span className="inline-block px-2 py-0.5 rounded bg-red-600 text-white text-xs font-medium">
           Coeff 1
         </span>{' '}
         and{' '}
-        <span className="inline-block px-2 py-0.5 rounded bg-neutral-700 text-red-300 font-mono text-xs">
+        <span className="inline-block px-2 py-0.5 rounded bg-neutral-700 text-neutral-200 text-xs font-medium">
           Coeff 2
         </span>
       </p>
-      <div className="inline-grid grid-cols-8 gap-1 bg-black p-2 rounded border border-red-900">
+      <div className="inline-grid grid-cols-8 gap-1 bg-black p-2 rounded border border-neutral-800">
         {Array.from({ length: 8 }).map((_, u) =>
           Array.from({ length: 8 }).map((_, v) => {
             const isCoeff1 = coeff1.u === u && coeff1.v === v;
@@ -47,12 +45,12 @@ export default function CoeffGridSelector({ coeff1, coeff2, onChange }: Props) {
                 key={`${u}-${v}`}
                 onClick={() => handleClick(u, v)}
                 className={[
-                  'w-10 h-10 text-[10px] font-mono rounded flex items-center justify-center transition-colors',
+                  'w-9 h-9 text-[10px] font-mono rounded flex items-center justify-center transition-colors',
                   isCoeff1
-                    ? 'bg-red-600 text-white font-bold ring-2 ring-red-400'
+                    ? 'bg-red-600 text-white font-semibold'
                     : isCoeff2
-                      ? 'bg-neutral-700 text-red-300 font-bold ring-2 ring-neutral-500'
-                      : 'bg-neutral-900 text-neutral-500 hover:bg-neutral-800 hover:text-red-400',
+                      ? 'bg-neutral-700 text-neutral-100 font-semibold'
+                      : 'bg-neutral-900 text-neutral-500 hover:bg-neutral-800',
                 ].join(' ')}
               >
                 {u},{v}

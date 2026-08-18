@@ -2,9 +2,8 @@
 
 :root {
   --background: #0a0a0a;
-  --foreground: #f5f5f5;
+  --foreground: #f2f2f2;
   --accent-red: #e11d2e;
-  --accent-red-dim: #7a0f18;
 }
 
 @theme inline {
@@ -15,26 +14,12 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: "Courier New", Courier, monospace;
-  background-image:
-    radial-gradient(circle at 15% 20%, rgba(225, 29, 46, 0.08), transparent 40%),
-    radial-gradient(circle at 85% 80%, rgba(225, 29, 46, 0.06), transparent 40%);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* tacky flourish: subtle red scanline / noise texture */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    0deg,
-    rgba(225, 29, 46, 0.02) 0px,
-    rgba(225, 29, 46, 0.02) 1px,
-    transparent 1px,
-    transparent 3px
-  );
-  z-index: 0;
+code, .font-mono {
+  font-family: "SF Mono", "Menlo", "Consolas", monospace;
 }
 
 input[type='range'] {
@@ -44,4 +29,26 @@ input[type='range'] {
 ::selection {
   background: var(--accent-red);
   color: #000;
+}
+
+/* Decorative red diagonal stripe strip - used sparingly, e.g. thin top bar */
+.stripe-accent {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--accent-red) 0px,
+    var(--accent-red) 8px,
+    #1a1a1a 8px,
+    #1a1a1a 16px
+  );
+}
+
+/* Decorative mosaic pattern - small red/black tile grid, used as a
+   background accent behind hero sections only, never full-page. */
+.mosaic-accent {
+  background-image:
+    linear-gradient(45deg, var(--accent-red) 25%, transparent 25%, transparent 75%, var(--accent-red) 75%),
+    linear-gradient(45deg, var(--accent-red) 25%, transparent 25%, transparent 75%, var(--accent-red) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+  opacity: 0.08;
 }

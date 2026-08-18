@@ -1,51 +1,50 @@
 'use client';
 
-import { useRef, useState } from 'react';
-import { decodeMarker, QR_VERSION, PX_PER_MODULE } from '@/lib/marker';
-import { imageToLumaGrid, loadImageFile } from '@/lib/canvasUtils';
+import { useState } from 'react';
+import { decodeImage, DEFAULT_SEED, DEFAULT_COEFF_1, DEFAULT_COEFF_2, type DecodeResult } from '@/lib/imageStego';
+import { loadImageFileNative, imageToRgbaNative } from '@/lib/canvasUtils';
+import CoeffGridSelector from '@/components/CoeffGridSelector';
+import CameraScan from '@/components/CameraScan';
+import type { CoeffPos } from '@/lib/dct';
 
-// Version 5 QR = 37 modules per side (fixed, matches the generator).
-const MODULE_SIZE = 4 * QR_VERSION + 17; // QR module-count formula: 17 + 4*version
-const CANONICAL_PX = MODULE_SIZE * PX_PER_MODULE;
+type Mode = 'unset' | 'upload' | 'scan';
 
 export default function DecodePage() {
+  const [seed, setSeed] = useState(DEFAULT_SEED);
+  const [coeff1, setCoeff1] = useState<CoeffPos>(DEFAULT_COEFF_1);
+  const [coeff2, setCoeff2] = useState<CoeffPos>(DEFAULT_COEFF_2);
+  const [mode, setMode] = useState<Mode>('unset');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{
-    message: string | null;
-    validCopies: number;
-    totalCopies: number;
-    totalBitErrorsCorrected: number;
-  } | null>(null);
-  const previewRef = useRef<HTMLCanvasElement>(null);
+  const [autoDetected, setAutoDetected] = useState(false);
+  const [result, setResult] = useState<DecodeResult | null>(null);
+  const [scannedQrText, setScannedQrText] = useState<string | null>(null);
 
   async function handleFile(file: File) {
     setError(null);
     setResult(null);
+
+    let useSeed = seed;
+    let useCoeff1 = coeff1;
+    let useCoeff2 = coeff2;
+    const match = file.name.match(/seed-(-?\d+)_c1-(\d)x(\d)_c2-(\d)x(\d)/);
+    if (match) {
+      useSeed = Number(match[1]);
+      useCoeff1 = { u: Number(match[2]), v: Number(match[3]) };
+      useCoeff2 = { u: Number(match[4]), v: Number(match[5]) };
+      setSeed(useSeed);
+      setCoeff1(useCoeff1);
+      setCoeff2(useCoeff2);
+      setAutoDetected(true);
+    } else {
+      setAutoDetected(false);
+    }
+
     setBusy(true);
     try {
-      const img = await loadImageFile(file);
-      const luma = imageToLumaGrid(img, CANONICAL_PX);
-
-      // preview what the decoder actually sees, post-resize
-      const canvas = previewRef.current!;
-      canvas.width = CANONICAL_PX;
-      canvas.height = CANONICAL_PX;
-      const ctx = canvas.getContext('2d')!;
-      const imgData = ctx.createImageData(CANONICAL_PX, CANONICAL_PX);
-      for (let y = 0; y < CANONICAL_PX; y++) {
-        for (let x = 0; x < CANONICAL_PX; x++) {
-          const v = Math.round(luma[y][x]);
-          const idx = (y * CANONICAL_PX + x) * 4;
-          imgData.data[idx] = v;
-          imgData.data[idx + 1] = v;
-          imgData.data[idx + 2] = v;
-          imgData.data[idx + 3] = 255;
-        }
-      }
-      ctx.putImageData(imgData, 0, 0);
-
-      const dec = await decodeMarker(luma, MODULE_SIZE);
+      const { img, width, height } = await loadImageFileNative(file);
+      const rgba = imageToRgbaNative(img, width, height);
+      const dec = decodeImage(rgba, { seed: useSeed, coeff1: useCoeff1, coeff2: useCoeff2 });
       setResult(dec);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -54,55 +53,121 @@ export default function DecodePage() {
     }
   }
 
+  const paramsLocked = mode !== 'unset';
+
   return (
-    <main className="max-w-2xl mx-auto p-8 space-y-6">
-      <h1 className="text-2xl font-semibold">Decode Marker</h1>
-      <p className="text-sm text-neutral-500">
-        Upload an image of the marker. This build resizes the upload directly to the canonical{' '}
-        {CANONICAL_PX}×{CANONICAL_PX}px grid — it does not yet perform fiducial detection or
-        perspective correction for off-angle camera captures. Use a straight, cropped, well-lit shot
-        for now.
-      </p>
+    <main className="max-w-3xl mx-auto px-6 py-10 space-y-8">
+      <div>
+        <h1 className="text-3xl font-bold text-neutral-50">Decode</h1>
+        <p className="text-sm text-neutral-400 mt-1 leading-relaxed">
+          Set the seed and coefficient pair first, then choose how to read the marker.
+        </p>
+      </div>
 
-      <input
-        type="file"
-        accept="image/*"
-        disabled={busy}
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) handleFile(f);
-        }}
-        className="block"
-      />
+      <section className="space-y-5 border border-neutral-800 rounded-lg p-6 bg-neutral-950">
+        <fieldset disabled={paramsLocked} className={paramsLocked ? 'opacity-50' : ''}>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-neutral-200 mb-1">Fixed PRNG Seed</label>
+              <input
+                type="number"
+                className="w-full border border-neutral-700 rounded px-3 py-2 bg-black text-neutral-100"
+                value={seed}
+                onChange={(e) => setSeed(Number(e.target.value) || 0)}
+              />
+              <p className="text-xs text-neutral-500 mt-1">
+                Hex: <span className="font-mono text-red-400">0x{seed.toString(16)}</span>
+              </p>
+            </div>
 
-      {error && <p className="text-red-600 text-sm">{error}</p>}
+            <CoeffGridSelector coeff1={coeff1} coeff2={coeff2} onChange={(c1, c2) => { setCoeff1(c1); setCoeff2(c2); }} />
+          </div>
+        </fieldset>
+
+        {paramsLocked && (
+          <button
+            onClick={() => { setMode('unset'); setResult(null); setError(null); }}
+            className="text-xs text-neutral-400 underline hover:text-red-400"
+          >
+            ← edit parameters
+          </button>
+        )}
+
+        {!paramsLocked && (
+          <div className="flex gap-3 pt-2">
+            <button
+              onClick={() => setMode('upload')}
+              className="flex-1 px-4 py-3 rounded bg-red-600 text-white font-medium hover:bg-red-500 transition-colors"
+            >
+              Upload Image
+            </button>
+            <button
+              onClick={() => setMode('scan')}
+              className="flex-1 px-4 py-3 rounded border border-neutral-700 text-neutral-100 font-medium hover:border-red-500 transition-colors"
+            >
+              Scan with Camera
+            </button>
+          </div>
+        )}
+      </section>
+
+      {mode === 'upload' && (
+        <section className="space-y-4 border border-neutral-800 rounded-lg p-6 bg-neutral-950">
+          <h2 className="text-sm font-semibold text-neutral-200">Upload Marker Image</h2>
+          <input
+            type="file"
+            accept="image/*"
+            disabled={busy}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) handleFile(f);
+            }}
+            className="block text-sm text-neutral-300"
+          />
+          {autoDetected && (
+            <p className="text-xs text-red-400">✓ Seed + coefficient pair auto-detected from filename.</p>
+          )}
+          {busy && <p className="text-sm text-neutral-400 animate-pulse">Decoding…</p>}
+          {error && <p className="text-sm text-red-500">{error}</p>}
+        </section>
+      )}
+
+      {mode === 'scan' && (
+        <section className="space-y-4 border border-neutral-800 rounded-lg p-6 bg-neutral-950">
+          <h2 className="text-sm font-semibold text-neutral-200">Point Camera at Marker</h2>
+          <CameraScan
+            decodeOpts={{ seed, coeff1, coeff2 }}
+            onResult={(res, qrText) => {
+              setResult(res);
+              setScannedQrText(qrText);
+            }}
+          />
+        </section>
+      )}
 
       {result && (
-        <div className="border rounded p-4 space-y-1">
+        <section className="border border-neutral-800 rounded-lg p-6 bg-neutral-950">
           {result.message ? (
             <>
-              <p className="text-lg font-mono">
-                Decoded: <span className="font-bold">&quot;{result.message}&quot;</span>
-              </p>
-              <p className="text-sm text-neutral-600">
+              <p className="text-2xl font-mono text-red-400">&quot;{result.message}&quot;</p>
+              <p className="text-xs text-neutral-500 mt-2">
                 Valid BCH copies: {result.validCopies}/{result.totalCopies} · bit errors corrected:{' '}
                 {result.totalBitErrorsCorrected}
+                {scannedQrText && (
+                  <>
+                    {' '}· QR visible text: <span className="font-mono text-neutral-300">{scannedQrText}</span>
+                  </>
+                )}
               </p>
             </>
           ) : (
-            <p className="text-red-600 font-medium">
+            <p className="text-red-500 font-medium">
               No valid payload detected ({result.validCopies}/{result.totalCopies} copies passed BCH
-              validation). This image likely has no embedded watermark, or distortion exceeded
-              correction capacity.
+              validation). Check the seed/coefficient pair, or the image may not carry a watermark.
             </p>
           )}
-        </div>
+        </section>
       )}
-
-      <div>
-        <p className="text-sm font-medium mb-1">Canonical grid as seen by the decoder:</p>
-        <canvas ref={previewRef} className="border" style={{ imageRendering: 'pixelated', maxWidth: '100%' }} />
-      </div>
     </main>
   );
 }
