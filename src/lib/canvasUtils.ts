@@ -13,6 +13,50 @@ export function lumaGridToImageData(luma: Float64Array[], size: number): ImageDa
   return imgData;
 }
 
+/** Load a File -> HTMLImageElement, and read its native pixel dimensions. */
+export function loadImageFileNative(file: File): Promise<{ img: HTMLImageElement; width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      img.onload = () => resolve({ img, width: img.naturalWidth, height: img.naturalHeight });
+      img.onerror = reject;
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/** Draw an image at its NATIVE resolution into a canvas and return raw RGBA. */
+export function imageToRgbaNative(img: HTMLImageElement, width: number, height: number): {
+  width: number;
+  height: number;
+  data: Uint8ClampedArray;
+} {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(img, 0, 0, width, height);
+  const imgData = ctx.getImageData(0, 0, width, height);
+  return { width, height, data: imgData.data };
+}
+
+/** Render an RgbaImage-shaped object to a canvas element (for preview/download). */
+export function rgbaToCanvas(
+  rgba: { width: number; height: number; data: Uint8ClampedArray },
+  canvas: HTMLCanvasElement
+) {
+  canvas.width = rgba.width;
+  canvas.height = rgba.height;
+  const ctx = canvas.getContext('2d')!;
+  const imgData = ctx.createImageData(rgba.width, rgba.height);
+  imgData.data.set(rgba.data);
+  ctx.putImageData(imgData, 0, 0);
+}
+
+
 /** Load a File into an HTMLImageElement. */
 export function loadImageFile(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
