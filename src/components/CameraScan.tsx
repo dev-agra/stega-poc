@@ -3,11 +3,14 @@
 import { useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
 import { warpQuadToSquare } from '@/lib/homography';
-import { decodeImage, type DecodeOptions, type DecodeResult } from '@/lib/imageStego';
+import { extractRawBits, resolveFromRawBits, DEFAULT_SEED, type DecodeOptions, type DecodeResult } from '@/lib/imageStego';
+import { computeBerReport, type BerReport } from '@/lib/ber';
 
 interface Props {
   decodeOpts: DecodeOptions;
   onResult: (result: DecodeResult, qrText: string) => void;
+  /** Fallback secret used for live BER/BERv2 diagnostics when no successful decode has happened yet. */
+  referenceSecret?: string;
 }
 
 const WARP_SIZE = 320;
@@ -18,7 +21,7 @@ const CROP_SIZE = 400;
 // Fraction of the (square, object-cover) video preview the anchor box covers.
 const ANCHOR_FRACTION = 0.78;
 
-export default function CameraScan({ decodeOpts, onResult }: Props) {
+export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const cropCanvasRef = useRef<HTMLCanvasElement>(null);
   const warpCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -27,6 +30,7 @@ export default function CameraScan({ decodeOpts, onResult }: Props) {
   const [flash, setFlash] = useState(false);
   const [invalidAttempts, setInvalidAttempts] = useState(0);
   const [lastQrText, setLastQrText] = useState<string | null>(null);
+  const [berReport, setBerReport] = useState<BerReport | null>(null);
   const rafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -133,7 +137,21 @@ export default function CameraScan({ decodeOpts, onResult }: Props) {
           wctx.putImageData(imgData, 0, 0);
         }
 
-        const result = decodeImage(warped, decodeOpts);
+        const seedForBer = decodeOpts.seed ?? DEFAULT_SEED;
+        const codec = decodeOpts.codec ?? 'bch';
+        const { rxBits, confidences } = extractRawBits(warped, decodeOpts);
+        const result = resolveFromRawBits(rxBits, seedForBer, codec);
+
+        // Live BER / BERv2: regenerate the reference bit-stream for a known
+        // secret (the one just recovered if decode succeeded, otherwise the
+        // fallback reference secret for calibration) and compare against
+        // this same frame's raw extraction -- reusing rxBits/confidences
+        // above so we only run the DCT extraction once per frame.
+        const secretForBer = result.message ?? referenceSecret;
+        if (secretForBer && secretForBer.length === 8) {
+          setBerReport(computeBerReport(secretForBer, seedForBer, rxBits, confidences));
+        }
+
         if (result.validCopies > 0) {
           setStatus('decoded');
           onResult(result, qr.data);
@@ -148,6 +166,7 @@ export default function CameraScan({ decodeOpts, onResult }: Props) {
         }
       } else {
         setStatus('searching');
+        setBerReport(null);
       }
 
       rafRef.current = requestAnimationFrame(tick);
@@ -215,6 +234,26 @@ export default function CameraScan({ decodeOpts, onResult }: Props) {
         <p className="text-xs text-neutral-500 mb-1">Aligned/cropped region the decoder is reading:</p>
         <canvas ref={warpCanvasRef} className="border border-neutral-800 rounded w-40 h-40" />
       </div>
+
+      {berReport && (
+        <div className="border border-neutral-800 rounded-lg p-4 bg-neutral-950">
+          <p className="text-xs font-semibold text-neutral-200 mb-2">Live bit-level diagnostics</p>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs text-neutral-500">BER (unweighted)</p>
+              <p className="text-xl font-mono text-red-400">{(berReport.ber * 100).toFixed(2)}%</p>
+            </div>
+            <div>
+              <p className="text-xs text-neutral-500">BERv2 (confidence-weighted)</p>
+              <p className="text-xl font-mono text-red-400">{(berReport.berV2 * 100).toFixed(2)}%</p>
+            </div>
+          </div>
+          <p className="text-[11px] text-neutral-500 mt-2">
+            {berReport.mismatches} / {berReport.bitsCompared} bits mismatched this frame
+            {!referenceSecret && !status.includes('decoded') && ' (using recovered secret once decoded)'}
+          </p>
+        </div>
+      )}
 
       {invalidAttempts >= 5 && (
         <div className="border border-red-900/50 rounded p-3 bg-red-950/30 text-sm text-red-300">

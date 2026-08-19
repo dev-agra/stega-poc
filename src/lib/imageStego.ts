@@ -242,6 +242,16 @@ export function extractRawBits(
   return { rxBits, confidences };
 }
 
+/** Resolve a final decode result from already-extracted raw bits (avoids re-running DCT extraction). */
+export function resolveFromRawBits(rxBits: number[], seed: number, codec: CodecKind = 'bch'): DecodeResult {
+  return codec === 'rs'
+    ? (() => {
+        const r = resolveRxBitsRS(rxBits, seed);
+        return { message: r.message, validCopies: r.validCopies, totalCopies: r.totalCopies, totalBitErrorsCorrected: r.totalSymbolErrorsCorrected };
+      })()
+    : resolveRxBits(rxBits, seed);
+}
+
 export interface DecodeOptions {
   seed?: number;
   coeff1?: CoeffPos;
@@ -261,15 +271,6 @@ export interface DecodeResult {
 export function decodeImage(input: RgbaImage, opts: DecodeOptions = {}): DecodeResult {
   const seed = opts.seed ?? DEFAULT_SEED;
   const codec = opts.codec ?? 'bch';
-
   const { rxBits } = extractRawBits(input, opts);
-
-  const resolved =
-    codec === 'rs'
-      ? (() => {
-          const r = resolveRxBitsRS(rxBits, seed);
-          return { message: r.message, validCopies: r.validCopies, totalCopies: r.totalCopies, totalBitErrorsCorrected: r.totalSymbolErrorsCorrected };
-        })()
-      : resolveRxBits(rxBits, seed);
-  return resolved;
+  return resolveFromRawBits(rxBits, seed, codec);
 }

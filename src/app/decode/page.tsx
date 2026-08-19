@@ -99,7 +99,7 @@ export default function DecodePage() {
 
             <div>
               <label className="block text-sm font-medium text-neutral-200 mb-1">
-                Reference secret <span className="text-neutral-500">(for BER diagnostics, upload path only)</span>
+                Reference secret <span className="text-neutral-500">(for BER diagnostics)</span>
               </label>
               <input
                 className="w-full border border-neutral-700 rounded px-3 py-2 bg-black text-neutral-100"
@@ -108,8 +108,9 @@ export default function DecodePage() {
                 onChange={(e) => setReferenceSecret(e.target.value)}
               />
               <p className="text-xs text-neutral-500 mt-1">
-                Used only if BCH decode fails — if decode succeeds, BER is computed against the
-                actually-recovered secret automatically.
+                Used as a fallback whenever BCH decode hasn&apos;t recovered a secret yet (including
+                live camera scanning before a valid decode). Once decode succeeds, BER switches to
+                using the actually-recovered secret automatically.
               </p>
             </div>
           </div>
@@ -168,6 +169,7 @@ export default function DecodePage() {
           <h2 className="text-sm font-semibold text-neutral-200">Point Camera at Marker</h2>
           <CameraScan
             decodeOpts={{ seed, coeff1, coeff2 }}
+            referenceSecret={referenceSecret}
             onResult={(res, qrText) => {
               setResult(res);
               setScannedQrText(qrText);
