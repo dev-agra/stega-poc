@@ -192,6 +192,56 @@ export function encodeImage(input: RgbaImage, secret8: string, opts: EncodeOptio
   };
 }
 
+export interface RawExtraction {
+  rxBits: number[];
+  confidences: number[]; // |F(coeff1) - F(coeff2)| per block - natural signal-strength weight
+}
+
+/**
+ * Extract the raw per-block bits (before any BCH/RS decoding) plus a
+ * per-bit confidence derived from the actual coefficient-pair separation
+ * magnitude. Used both by decodeImage() and by the BER/BERv2 diagnostic.
+ */
+export function extractRawBits(
+  input: RgbaImage,
+  opts: { seed?: number; coeff1?: CoeffPos; coeff2?: CoeffPos; interleave?: boolean } = {}
+): RawExtraction {
+  const seed = opts.seed ?? DEFAULT_SEED;
+  const coeff1 = opts.coeff1 ?? DEFAULT_COEFF_1;
+  const coeff2 = opts.coeff2 ?? DEFAULT_COEFF_2;
+  const interleave = opts.interleave ?? false;
+
+  const { R, G, B } = splitChannels(input);
+  const R256 = resizeBilinear(R, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
+  const G256 = resizeBilinear(G, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
+  const B256 = resizeBilinear(B, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
+  const { Y } = rgbToYCbCr(R256, G256, B256);
+
+  const permutation = interleave ? seededPermutation(TOTAL_BLOCKS, seed ^ 0x9e3779b9) : null;
+
+  const rxBits: number[] = [];
+  const confidences: number[] = [];
+  for (let bitIdx = 0; bitIdx < TOTAL_BLOCKS; bitIdx++) {
+    const blockIdx = permutation ? permutation[bitIdx] : bitIdx;
+    const blockRow = Math.floor(blockIdx / BLOCK_COUNT_PER_SIDE);
+    const blockCol = blockIdx % BLOCK_COUNT_PER_SIDE;
+    const by = blockRow * 8;
+    const bx = blockCol * 8;
+
+    const block: Block8 = makeBlock();
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        block[y][x] = Y[(by + y) * CANONICAL_SIZE + (bx + x)];
+      }
+    }
+    const F = dct8x8(block);
+    rxBits.push(extractBitFromCoeffs(F, coeff1, coeff2));
+    confidences.push(Math.abs(F[coeff1.u][coeff1.v] - F[coeff2.u][coeff2.v]));
+  }
+
+  return { rxBits, confidences };
+}
+
 export interface DecodeOptions {
   seed?: number;
   coeff1?: CoeffPos;
@@ -210,36 +260,9 @@ export interface DecodeResult {
 /** Decode: any-resolution RGBA in -> downsample to canonical grid -> extract + BCH/RS-recover. */
 export function decodeImage(input: RgbaImage, opts: DecodeOptions = {}): DecodeResult {
   const seed = opts.seed ?? DEFAULT_SEED;
-  const coeff1 = opts.coeff1 ?? DEFAULT_COEFF_1;
-  const coeff2 = opts.coeff2 ?? DEFAULT_COEFF_2;
   const codec = opts.codec ?? 'bch';
-  const interleave = opts.interleave ?? false;
 
-  const { R, G, B } = splitChannels(input);
-  const R256 = resizeBilinear(R, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
-  const G256 = resizeBilinear(G, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
-  const B256 = resizeBilinear(B, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
-  const { Y } = rgbToYCbCr(R256, G256, B256);
-
-  const permutation = interleave ? seededPermutation(TOTAL_BLOCKS, seed ^ 0x9e3779b9) : null;
-
-  const rxBits: number[] = [];
-  for (let bitIdx = 0; bitIdx < TOTAL_BLOCKS; bitIdx++) {
-    const blockIdx = permutation ? permutation[bitIdx] : bitIdx;
-    const blockRow = Math.floor(blockIdx / BLOCK_COUNT_PER_SIDE);
-    const blockCol = blockIdx % BLOCK_COUNT_PER_SIDE;
-    const by = blockRow * 8;
-    const bx = blockCol * 8;
-
-    const block: Block8 = makeBlock();
-    for (let y = 0; y < 8; y++) {
-      for (let x = 0; x < 8; x++) {
-        block[y][x] = Y[(by + y) * CANONICAL_SIZE + (bx + x)];
-      }
-    }
-    const F = dct8x8(block);
-    rxBits.push(extractBitFromCoeffs(F, coeff1, coeff2));
-  }
+  const { rxBits } = extractRawBits(input, opts);
 
   const resolved =
     codec === 'rs'
