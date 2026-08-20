@@ -3,25 +3,29 @@
 import { useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
 import { warpQuadToSquare } from '@/lib/homography';
-import { extractRawBits, resolveFromRawBits, DEFAULT_SEED, type DecodeOptions, type DecodeResult } from '@/lib/imageStego';
+import { extractRawBits, resolveFromRawBits, DEFAULT_SEED, DEFAULT_SECRET, type DecodeOptions, type DecodeResult } from '@/lib/imageStego';
 import { computeBerReport, type BerReport } from '@/lib/ber';
 
 interface Props {
+  /**
+   * 'decode': pure decode flow, no BER computation at all - just find the
+   *   marker and recover the secret as fast as possible.
+   * 'ber': BER-only diagnostic session - never attempts a full BCH decode,
+   *   just tracks BER per detected frame plus a running session-best
+   *   (lowest) score, with a reset control. Compares against the app-wide
+   *   fixed secret (DEFAULT_SECRET), since secret/seed are constants
+   *   everywhere in this app.
+   */
+  mode: 'decode' | 'ber';
   decodeOpts: DecodeOptions;
-  onResult: (result: DecodeResult, qrText: string) => void;
-  /** Fallback secret used for live BER/BERv2 diagnostics when no successful decode has happened yet. */
-  referenceSecret?: string;
+  onResult?: (result: DecodeResult, qrText: string) => void;
 }
 
 const WARP_SIZE = 320;
-// Working resolution we crop the anchor region down to before running jsQR.
-// Small on purpose: jsQR cost scales with pixel count, and we only ever
-// need to search inside the anchor box, not the whole camera frame.
 const CROP_SIZE = 400;
-// Fraction of the (square, object-cover) video preview the anchor box covers.
 const ANCHOR_FRACTION = 0.78;
 
-export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Props) {
+export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const cropCanvasRef = useRef<HTMLCanvasElement>(null);
   const warpCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -30,10 +34,21 @@ export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Pr
   const [flash, setFlash] = useState(false);
   const [invalidAttempts, setInvalidAttempts] = useState(0);
   const [lastQrText, setLastQrText] = useState<string | null>(null);
-  const [berReport, setBerReport] = useState<BerReport | null>(null);
+
+  // BER-mode session tracking
+  const [currentBer, setCurrentBer] = useState<BerReport | null>(null);
+  const [lowestBer, setLowestBer] = useState<BerReport | null>(null);
+  const [framesAnalyzed, setFramesAnalyzed] = useState(0);
+
   const rafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function resetSession() {
+    setLowestBer(null);
+    setFramesAnalyzed(0);
+    setCurrentBer(null);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -55,10 +70,6 @@ export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Pr
         }
         streamRef.current = stream;
 
-        // Some browsers only honor advanced photo constraints (white
-        // balance, exposure) via an explicit applyConstraints call on the
-        // track, not through the initial getUserMedia video constraints.
-        // Best-effort only — silently ignored where unsupported.
         try {
           const [track] = stream.getVideoTracks();
           const capabilities = track.getCapabilities?.() as MediaTrackCapabilities & { whiteBalanceMode?: string[] };
@@ -92,11 +103,6 @@ export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Pr
 
       const vw = video.videoWidth;
       const vh = video.videoHeight;
-
-      // The preview container is a square using object-cover, so the video's
-      // centered square crop (side = min(vw,vh)) is what's actually visible.
-      // The anchor box is a further centered ANCHOR_FRACTION of that square.
-      // Map both down to native video pixel coordinates.
       const visibleSide = Math.min(vw, vh);
       const visibleX = (vw - visibleSide) / 2;
       const visibleY = (vh - visibleSide) / 2;
@@ -107,8 +113,6 @@ export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Pr
       cropCanvas.width = CROP_SIZE;
       cropCanvas.height = CROP_SIZE;
       const cropCtx = cropCanvas.getContext('2d')!;
-      // Single drawImage call crops directly from the video's native anchor
-      // region and scales it to CROP_SIZE - no full-frame read needed.
       cropCtx.drawImage(video, anchorX, anchorY, anchorSide, anchorSide, 0, 0, CROP_SIZE, CROP_SIZE);
       const cropped = cropCtx.getImageData(0, 0, CROP_SIZE, CROP_SIZE);
 
@@ -137,36 +141,36 @@ export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Pr
           wctx.putImageData(imgData, 0, 0);
         }
 
-        const seedForBer = decodeOpts.seed ?? DEFAULT_SEED;
-        const codec = decodeOpts.codec ?? 'bch';
-        const { rxBits, confidences } = extractRawBits(warped, decodeOpts);
-        const result = resolveFromRawBits(rxBits, seedForBer, codec);
+        if (mode === 'decode') {
+          // Pure decode path: no BER pass at all - just extract + resolve.
+          const seed = decodeOpts.seed ?? DEFAULT_SEED;
+          const codec = decodeOpts.codec ?? 'bch';
+          const { rxBits } = extractRawBits(warped, decodeOpts);
+          const result = resolveFromRawBits(rxBits, seed, codec);
 
-        // Live BER / BERv2: regenerate the reference bit-stream for a known
-        // secret (the one just recovered if decode succeeded, otherwise the
-        // fallback reference secret for calibration) and compare against
-        // this same frame's raw extraction -- reusing rxBits/confidences
-        // above so we only run the DCT extraction once per frame.
-        const secretForBer = result.message ?? referenceSecret;
-        if (secretForBer && secretForBer.length === 8) {
-          setBerReport(computeBerReport(secretForBer, seedForBer, rxBits, confidences));
-        }
-
-        if (result.validCopies > 0) {
-          setStatus('decoded');
-          onResult(result, qr.data);
-          return; // stop scanning once decoded
+          if (result.validCopies > 0) {
+            setStatus('decoded');
+            onResult?.(result, qr.data);
+            return; // stop scanning once decoded
+          } else {
+            setStatus('found-invalid');
+            setLastQrText(qr.data);
+            setInvalidAttempts((n) => n + 1);
+          }
         } else {
-          // QR detected and read cleanly, but no valid watermark payload
-          // came out of it -- almost always a seed/coefficient mismatch
-          // (or the QR genuinely wasn't watermarked with this tool).
-          setStatus('found-invalid');
+          // BER-only session path: never attempts BCH decode. Secret/seed
+          // are fixed app-wide constants, so no extra input is needed.
           setLastQrText(qr.data);
-          setInvalidAttempts((n) => n + 1);
+          const seed = decodeOpts.seed ?? DEFAULT_SEED;
+          const { rxBits } = extractRawBits(warped, decodeOpts);
+          const report = computeBerReport(DEFAULT_SECRET, seed, rxBits);
+          setCurrentBer(report);
+          setFramesAnalyzed((n) => n + 1);
+          setLowestBer((prev) => (prev === null || report.ber < prev.ber ? report : prev));
         }
       } else {
         setStatus('searching');
-        setBerReport(null);
+        if (mode === 'ber') setCurrentBer(null);
       }
 
       rafRef.current = requestAnimationFrame(tick);
@@ -181,14 +185,13 @@ export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Pr
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mode]);
 
   return (
     <div className="space-y-3">
       <div className="relative aspect-square w-full max-w-sm mx-auto border border-neutral-800 rounded overflow-hidden bg-black">
         <video ref={videoRef} className="absolute inset-0 w-full h-full object-cover" playsInline muted />
 
-        {/* Anchor box overlay: corner brackets marking where to place the marker */}
         <div
           className="absolute pointer-events-none"
           style={{
@@ -215,13 +218,13 @@ export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Pr
           ))}
         </div>
 
-        {/* Capture flash feedback */}
         {flash && <div className="absolute inset-0 bg-white/20 pointer-events-none" />}
 
         <div className="absolute top-2 left-2 px-2 py-1 rounded text-xs font-medium bg-black/70 text-white">
           {status === 'starting' && 'Starting camera…'}
           {status === 'searching' && 'Align marker within the brackets…'}
-          {status === 'found-qr' && 'QR found — reading…'}
+          {status === 'found-qr' && mode === 'decode' && 'QR found — reading…'}
+          {status === 'found-qr' && mode === 'ber' && 'QR found — measuring BER…'}
           {status === 'found-invalid' && 'QR read, but no valid payload — reading…'}
           {status === 'decoded' && 'Decoded ✓'}
           {status === 'error' && `Camera error: ${errorMsg}`}
@@ -235,39 +238,50 @@ export default function CameraScan({ decodeOpts, onResult, referenceSecret }: Pr
         <canvas ref={warpCanvasRef} className="border border-neutral-800 rounded w-40 h-40" />
       </div>
 
-      {berReport && (
-        <div className="border border-neutral-800 rounded-lg p-4 bg-neutral-950">
-          <p className="text-xs font-semibold text-neutral-200 mb-2">Live bit-level diagnostics</p>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <p className="text-xs text-neutral-500">BER (unweighted)</p>
-              <p className="text-xl font-mono text-red-400">{(berReport.ber * 100).toFixed(2)}%</p>
-            </div>
-            <div>
-              <p className="text-xs text-neutral-500">BERv2 (confidence-weighted)</p>
-              <p className="text-xl font-mono text-red-400">{(berReport.berV2 * 100).toFixed(2)}%</p>
-            </div>
-          </div>
-          <p className="text-[11px] text-neutral-500 mt-2">
-            {berReport.mismatches} / {berReport.bitsCompared} bits mismatched this frame
-            {!referenceSecret && !status.includes('decoded') && ' (using recovered secret once decoded)'}
-          </p>
-        </div>
-      )}
-
-      {invalidAttempts >= 5 && (
+      {mode === 'decode' && invalidAttempts >= 5 && (
         <div className="border border-red-900/50 rounded p-3 bg-red-950/30 text-sm text-red-300">
           <p className="font-medium">QR detected repeatedly, but never a valid payload.</p>
           <p className="text-xs text-red-400/80 mt-1">
-            This almost always means the seed / coefficient pair set above doesn&apos;t match what
-            was used to encode this marker — the filename auto-detect feature only works on the
-            Upload path, not Scan, so double-check those values match the encoded filename exactly.
+            This almost always means the coefficient pair set above doesn&apos;t match what was used
+            to encode this marker — the filename auto-detect feature only works on the Upload path,
+            not Scan, so double-check the coefficient pair matches the encoded filename exactly.
           </p>
           {lastQrText && (
             <p className="text-xs text-neutral-400 mt-2">
               QR visible text being read: <span className="font-mono">{lastQrText}</span>
             </p>
           )}
+        </div>
+      )}
+
+      {mode === 'ber' && (
+        <div className="border border-neutral-800 rounded-lg p-4 bg-neutral-950 space-y-4">
+          <div>
+            <p className="text-xs font-semibold text-neutral-200 mb-2">This frame</p>
+            {currentBer ? (
+              <div>
+                <p className="text-xs text-neutral-500">BER</p>
+                <p className="text-xl font-mono text-red-400">{(currentBer.ber * 100).toFixed(2)}%</p>
+              </div>
+            ) : (
+              <p className="text-xs text-neutral-500">No marker in frame right now.</p>
+            )}
+          </div>
+
+          <div className="pt-3 border-t border-neutral-800">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-semibold text-neutral-200">
+                Session best (lowest) · {framesAnalyzed} frame{framesAnalyzed === 1 ? '' : 's'} analyzed
+              </p>
+              <button onClick={resetSession} className="text-xs text-neutral-400 underline hover:text-red-400">
+                Reset session
+              </button>
+            </div>
+            <p className="text-xs text-neutral-500">Lowest BER</p>
+            <p className="text-xl font-mono text-green-400">
+              {lowestBer ? `${(lowestBer.ber * 100).toFixed(2)}%` : '—'}
+            </p>
+          </div>
         </div>
       )}
     </div>

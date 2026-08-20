@@ -36,6 +36,7 @@ export const CANONICAL_SIZE = 256;
 export const BLOCK_COUNT_PER_SIDE = CANONICAL_SIZE / 8; // 32
 export const TOTAL_BLOCKS = BLOCK_COUNT_PER_SIDE * BLOCK_COUNT_PER_SIDE; // 1024
 export const DEFAULT_SEED = 0x5eed_c0de;
+export const DEFAULT_SECRET = 'SECRET01';
 export const DEFAULT_STRENGTH = 120;
 export const MAX_STRENGTH = 2000;
 export const DEFAULT_COEFF_1: CoeffPos = { u: 2, v: 3 };
@@ -194,14 +195,9 @@ export function encodeImage(input: RgbaImage, secret8: string, opts: EncodeOptio
 
 export interface RawExtraction {
   rxBits: number[];
-  confidences: number[]; // |F(coeff1) - F(coeff2)| per block - natural signal-strength weight
 }
 
-/**
- * Extract the raw per-block bits (before any BCH/RS decoding) plus a
- * per-bit confidence derived from the actual coefficient-pair separation
- * magnitude. Used both by decodeImage() and by the BER/BERv2 diagnostic.
- */
+/** Extract the raw per-block bits (before any BCH/RS decoding). Used both by decodeImage() and by the BER diagnostic. */
 export function extractRawBits(
   input: RgbaImage,
   opts: { seed?: number; coeff1?: CoeffPos; coeff2?: CoeffPos; interleave?: boolean } = {}
@@ -220,7 +216,6 @@ export function extractRawBits(
   const permutation = interleave ? seededPermutation(TOTAL_BLOCKS, seed ^ 0x9e3779b9) : null;
 
   const rxBits: number[] = [];
-  const confidences: number[] = [];
   for (let bitIdx = 0; bitIdx < TOTAL_BLOCKS; bitIdx++) {
     const blockIdx = permutation ? permutation[bitIdx] : bitIdx;
     const blockRow = Math.floor(blockIdx / BLOCK_COUNT_PER_SIDE);
@@ -236,11 +231,11 @@ export function extractRawBits(
     }
     const F = dct8x8(block);
     rxBits.push(extractBitFromCoeffs(F, coeff1, coeff2));
-    confidences.push(Math.abs(F[coeff1.u][coeff1.v] - F[coeff2.u][coeff2.v]));
   }
 
-  return { rxBits, confidences };
+  return { rxBits };
 }
+
 
 /** Resolve a final decode result from already-extracted raw bits (avoids re-running DCT extraction). */
 export function resolveFromRawBits(rxBits: number[], seed: number, codec: CodecKind = 'bch'): DecodeResult {

@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { encodeImage, DEFAULT_STRENGTH, MAX_STRENGTH, DEFAULT_SEED, DEFAULT_COEFF_1, DEFAULT_COEFF_2, type RgbaImage } from '@/lib/imageStego';
+import { encodeImage, DEFAULT_STRENGTH, MAX_STRENGTH, DEFAULT_SEED, DEFAULT_SECRET, DEFAULT_COEFF_1, DEFAULT_COEFF_2, type RgbaImage } from '@/lib/imageStego';
 import { loadImageFileNative, imageToRgbaNative, rgbaToCanvas } from '@/lib/canvasUtils';
 import { parseBulkCsv, bulkEncodeToZip, type BulkRow } from '@/lib/bulkEncode';
 import CoeffGridSelector from '@/components/CoeffGridSelector';
@@ -12,10 +12,8 @@ type PageMode = 'single' | 'bulk';
 export default function EncodePage() {
   const [pageMode, setPageMode] = useState<PageMode>('single');
 
-  // --- Single-encode state ---
-  const [secret, setSecret] = useState('SECRET01');
+  // --- Single-encode state (secret + seed are fixed app-wide constants) ---
   const [strength, setStrength] = useState(DEFAULT_STRENGTH);
-  const [seed, setSeed] = useState(DEFAULT_SEED);
   const [coeff1, setCoeff1] = useState<CoeffPos>(DEFAULT_COEFF_1);
   const [coeff2, setCoeff2] = useState<CoeffPos>(DEFAULT_COEFF_2);
   const [error, setError] = useState<string | null>(null);
@@ -29,13 +27,9 @@ export default function EncodePage() {
 
   function runEncode(rgba: RgbaImage) {
     setError(null);
-    if (secret.length !== 8) {
-      setError('Secret message must be exactly 8 characters.');
-      return;
-    }
     setBusy(true);
     try {
-      const result = encodeImage(rgba, secret, { strength, seed, coeff1, coeff2 });
+      const result = encodeImage(rgba, DEFAULT_SECRET, { strength, seed: DEFAULT_SEED, coeff1, coeff2 });
       const canvas = canvasRef.current!;
       rgbaToCanvas(result.image, canvas);
       setStats(
@@ -45,7 +39,7 @@ export default function EncodePage() {
       );
       setDownloadUrl(canvas.toDataURL('image/png'));
       setDownloadName(
-        `stego_seed-${seed}_c1-${coeff1.u}x${coeff1.v}_c2-${coeff2.u}x${coeff2.v}_str-${strength}.png`
+        `stego_c1-${coeff1.u}x${coeff1.v}_c2-${coeff2.u}x${coeff2.v}_str-${strength}.png`
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -70,9 +64,7 @@ export default function EncodePage() {
     }
   }
 
-  // --- Bulk-encode state ---
-  const [bulkSecret, setBulkSecret] = useState('SECRET01');
-  const [bulkSeed, setBulkSeed] = useState(DEFAULT_SEED);
+  // --- Bulk-encode state (secret + seed fixed here too) ---
   const [bulkImage, setBulkImage] = useState<RgbaImage | null>(null);
   const [bulkImageName, setBulkImageName] = useState<string | null>(null);
   const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
@@ -100,15 +92,11 @@ export default function EncodePage() {
 
   async function runBulkEncode() {
     if (!bulkImage || bulkRows.length === 0) return;
-    if (bulkSecret.length !== 8) {
-      setBulkErrors(['Secret message must be exactly 8 characters.']);
-      return;
-    }
     setBulkBusy(true);
     setBulkZipUrl(null);
     setBulkProgress({ completed: 0, total: bulkRows.length });
     try {
-      const blob = await bulkEncodeToZip(bulkImage, bulkSecret, bulkSeed, bulkRows, (progress) => {
+      const blob = await bulkEncodeToZip(bulkImage, DEFAULT_SECRET, DEFAULT_SEED, bulkRows, (progress) => {
         setBulkProgress({ completed: progress.completed, total: progress.total });
       });
       setBulkZipUrl(URL.createObjectURL(blob));
@@ -126,7 +114,10 @@ export default function EncodePage() {
         <p className="text-sm text-neutral-400 mt-1 leading-relaxed">
           Upload any RGB image, any resolution. Output ships at the same resolution — the payload
           is embedded via a 256×256 canonical DCT grid and projected back out via residual delta
-          masking, so it survives resizing after the fact.
+          masking, so it survives resizing after the fact. Secret and seed are fixed app-wide (
+          <span className="font-mono text-red-400">{DEFAULT_SECRET}</span> /{' '}
+          <span className="font-mono text-red-400">0x{DEFAULT_SEED.toString(16)}</span>) — only
+          strength and coefficient pair vary.
         </p>
       </div>
 
@@ -150,19 +141,6 @@ export default function EncodePage() {
           <section className="space-y-5 border border-neutral-800 rounded-lg p-6 bg-neutral-950">
             <div>
               <label className="block text-sm font-medium text-neutral-200 mb-1">
-                Secret payload <span className="text-neutral-500">(exactly 8 characters)</span>
-              </label>
-              <input
-                className="w-full border border-neutral-700 rounded px-3 py-2 bg-black text-neutral-100"
-                value={secret}
-                maxLength={8}
-                onChange={(e) => setSecret(e.target.value)}
-              />
-              <p className="text-xs text-neutral-500 mt-1">{secret.length}/8 characters</p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-neutral-200 mb-1">
                 Embedding strength (α): <span className="font-mono text-red-400">{strength}</span> / {MAX_STRENGTH}
               </label>
               <input
@@ -175,19 +153,6 @@ export default function EncodePage() {
               />
               <p className="text-xs text-neutral-500 mt-1">
                 0–150 subtle · 150–500 visible on close inspection · 500+ visibly distorted, maximal robustness.
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-neutral-200 mb-1">Fixed PRNG seed</label>
-              <input
-                type="number"
-                className="w-full border border-neutral-700 rounded px-3 py-2 bg-black text-neutral-100"
-                value={seed}
-                onChange={(e) => setSeed(Number(e.target.value) || 0)}
-              />
-              <p className="text-xs text-neutral-500 mt-1">
-                Must match on decode. Hex: <span className="font-mono text-red-400">0x{seed.toString(16)}</span>
               </p>
             </div>
 
@@ -260,30 +225,6 @@ export default function EncodePage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-neutral-200 mb-1">
-              Secret payload <span className="text-neutral-500">(exactly 8 characters, same for all rows)</span>
-            </label>
-            <input
-              className="w-full border border-neutral-700 rounded px-3 py-2 bg-black text-neutral-100"
-              value={bulkSecret}
-              maxLength={8}
-              onChange={(e) => setBulkSecret(e.target.value)}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-neutral-200 mb-1">
-              Fixed PRNG seed <span className="text-neutral-500">(same for all rows)</span>
-            </label>
-            <input
-              type="number"
-              className="w-full border border-neutral-700 rounded px-3 py-2 bg-black text-neutral-100"
-              value={bulkSeed}
-              onChange={(e) => setBulkSeed(Number(e.target.value) || 0)}
-            />
-          </div>
-
-          <div>
             <label className="block text-sm font-medium text-neutral-200 mb-2">Base image</label>
             <input
               type="file"
@@ -348,7 +289,7 @@ export default function EncodePage() {
           {bulkZipUrl && (
             <a
               href={bulkZipUrl}
-              download={`bulk-stego_seed-${bulkSeed}_${bulkRows.length}-images.zip`}
+              download={`bulk-stego_${bulkRows.length}-images.zip`}
               className="block text-center text-sm text-red-400 font-medium hover:text-red-300 border border-red-700 rounded py-2.5"
             >
               Download ZIP ({bulkRows.length} images)
