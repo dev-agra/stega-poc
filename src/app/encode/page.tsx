@@ -4,10 +4,12 @@ import { useRef, useState } from 'react';
 import { encodeImage, DEFAULT_STRENGTH, MAX_STRENGTH, DEFAULT_SEED, DEFAULT_SECRET, DEFAULT_COEFF_1, DEFAULT_COEFF_2, type RgbaImage } from '@/lib/imageStego';
 import { loadImageFileNative, imageToRgbaNative, rgbaToCanvas } from '@/lib/canvasUtils';
 import { parseBulkCsv, bulkEncodeToZip, type BulkRow } from '@/lib/bulkEncode';
+import { runMultiLayerEncode, multiLayerResultsToZip, findCoefficientCollisions, type LayerSpec } from '@/lib/multiEncode';
+import MultiCoeffSelector from '@/components/MultiCoeffSelector';
 import CoeffGridSelector from '@/components/CoeffGridSelector';
 import type { CoeffPos } from '@/lib/dct';
 
-type PageMode = 'single' | 'bulk';
+type PageMode = 'single' | 'bulk' | 'multi';
 
 export default function EncodePage() {
   const [pageMode, setPageMode] = useState<PageMode>('single');
@@ -107,6 +109,45 @@ export default function EncodePage() {
     }
   }
 
+  // --- Multi-layer encode state ---
+  const [multiImage, setMultiImage] = useState<RgbaImage | null>(null);
+  const [multiImageName, setMultiImageName] = useState<string | null>(null);
+  const [multiStrength, setMultiStrength] = useState(DEFAULT_STRENGTH);
+  const [multiLayers, setMultiLayers] = useState<LayerSpec[]>([]);
+  const [multiBusy, setMultiBusy] = useState(false);
+  const [multiError, setMultiError] = useState<string | null>(null);
+  const [multiZipUrl, setMultiZipUrl] = useState<string | null>(null);
+  const [multiWarnings, setMultiWarnings] = useState<string[]>([]);
+
+  async function handleMultiImage(file: File) {
+    setMultiImageName(file.name);
+    setMultiZipUrl(null);
+    const { img, width, height } = await loadImageFileNative(file);
+    setMultiImage(imageToRgbaNative(img, width, height));
+  }
+
+  async function runMultiEncode() {
+    if (!multiImage || multiLayers.length === 0) return;
+    setMultiError(null);
+    setMultiZipUrl(null);
+    setMultiBusy(true);
+    try {
+      const results = runMultiLayerEncode(multiImage, DEFAULT_SECRET, DEFAULT_SEED, multiStrength, multiLayers);
+      const blob = await multiLayerResultsToZip(results);
+      setMultiZipUrl(URL.createObjectURL(blob));
+    } catch (e) {
+      setMultiError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMultiBusy(false);
+    }
+  }
+
+  function updateMultiLayers(layers: LayerSpec[]) {
+    setMultiLayers(layers);
+    setMultiWarnings(findCoefficientCollisions(layers));
+    setMultiZipUrl(null);
+  }
+
   return (
     <main className="max-w-3xl mx-auto px-6 py-10 space-y-8">
       <div>
@@ -133,6 +174,12 @@ export default function EncodePage() {
           className={`px-4 py-1.5 rounded text-sm font-medium transition-colors ${pageMode === 'bulk' ? 'bg-red-600 text-white' : 'text-neutral-400 hover:text-neutral-200'}`}
         >
           Bulk Generate
+        </button>
+        <button
+          onClick={() => setPageMode('multi')}
+          className={`px-4 py-1.5 rounded text-sm font-medium transition-colors ${pageMode === 'multi' ? 'bg-red-600 text-white' : 'text-neutral-400 hover:text-neutral-200'}`}
+        >
+          Multi Encode
         </button>
       </div>
 
@@ -293,6 +340,79 @@ export default function EncodePage() {
               className="block text-center text-sm text-red-400 font-medium hover:text-red-300 border border-red-700 rounded py-2.5"
             >
               Download ZIP ({bulkRows.length} images)
+            </a>
+          )}
+        </section>
+      )}
+
+      {pageMode === 'multi' && (
+        <section className="space-y-5 border border-neutral-800 rounded-lg p-6 bg-neutral-950">
+          <div>
+            <h2 className="text-sm font-semibold text-neutral-200 mb-1">Multi Encode (Layered)</h2>
+            <p className="text-xs text-neutral-500 leading-relaxed">
+              Same image, secret, seed and strength throughout. Each layer embeds using a different
+              coefficient pair, applied cascaded on top of the previous layer&apos;s output — layer 2
+              encodes onto layer 1&apos;s result, layer 3 onto layer 2&apos;s result, and so on. The ZIP
+              contains every layer&apos;s cumulative output plus the final result.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-neutral-200 mb-2">Base image</label>
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleMultiImage(f);
+              }}
+              className="block text-sm text-neutral-300"
+            />
+            {multiImageName && <p className="text-xs text-neutral-500 mt-1">{multiImageName}</p>}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-neutral-200 mb-1">
+              Embedding strength (α): <span className="font-mono text-red-400">{multiStrength}</span> / {MAX_STRENGTH}
+              <span className="text-neutral-500"> (shared across all layers)</span>
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={MAX_STRENGTH}
+              value={multiStrength}
+              onChange={(e) => setMultiStrength(Number(e.target.value))}
+              className="w-full"
+            />
+          </div>
+
+          <MultiCoeffSelector layers={multiLayers} onChange={updateMultiLayers} />
+
+          {multiWarnings.length > 0 && (
+            <div className="border border-amber-800/50 rounded p-3 bg-amber-950/20 text-xs text-amber-400 space-y-1">
+              {multiWarnings.map((w, i) => (
+                <p key={i}>⚠ {w}</p>
+              ))}
+            </div>
+          )}
+
+          {multiError && <p className="text-sm text-red-500 font-medium">{multiError}</p>}
+
+          <button
+            onClick={runMultiEncode}
+            disabled={!multiImage || multiLayers.length === 0 || multiBusy}
+            className="w-full px-4 py-2.5 rounded bg-red-600 text-white font-medium hover:bg-red-500 transition-colors disabled:opacity-40"
+          >
+            {multiBusy ? 'Generating…' : `Generate ${multiLayers.length || ''} layer${multiLayers.length === 1 ? '' : 's'} as ZIP`}
+          </button>
+
+          {multiZipUrl && (
+            <a
+              href={multiZipUrl}
+              download={`multi-stego_${multiLayers.length}-layers.zip`}
+              className="block text-center text-sm text-red-400 font-medium hover:text-red-300 border border-red-700 rounded py-2.5"
+            >
+              Download ZIP ({multiLayers.length} layers + final)
             </a>
           )}
         </section>

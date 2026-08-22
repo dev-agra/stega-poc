@@ -5,6 +5,7 @@ import jsQR from 'jsqr';
 import { warpQuadToSquare } from '@/lib/homography';
 import { extractRawBits, resolveFromRawBits, DEFAULT_SEED, DEFAULT_SECRET, type DecodeOptions, type DecodeResult } from '@/lib/imageStego';
 import { computeBerReport, type BerReport } from '@/lib/ber';
+import { toGrayscale, assessFrameQuality, DEFAULT_QUALITY_THRESHOLDS, type FrameQuality } from '@/lib/frameQuality';
 
 interface Props {
   /**
@@ -29,11 +30,14 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const cropCanvasRef = useRef<HTMLCanvasElement>(null);
   const warpCanvasRef = useRef<HTMLCanvasElement>(null);
-  const [status, setStatus] = useState<'starting' | 'searching' | 'found-qr' | 'found-invalid' | 'decoded' | 'error'>('starting');
+  const [status, setStatus] = useState<'starting' | 'searching' | 'found-qr' | 'found-blurry' | 'found-invalid' | 'decoded' | 'error'>('starting');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [flash, setFlash] = useState(false);
   const [invalidAttempts, setInvalidAttempts] = useState(0);
   const [lastQrText, setLastQrText] = useState<string | null>(null);
+  const [lastQuality, setLastQuality] = useState<FrameQuality | null>(null);
+  const [rejectedFrames, setRejectedFrames] = useState(0);
+  const previousGrayRef = useRef<Float64Array | null>(null);
 
   // BER-mode session tracking
   const [currentBer, setCurrentBer] = useState<BerReport | null>(null);
@@ -119,6 +123,23 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
       const qr = jsQR(cropped.data, CROP_SIZE, CROP_SIZE, { inversionAttempts: 'attemptBoth' });
 
       if (qr) {
+        // Quality gate AFTER confirming a marker is actually present (jsQR
+        // itself tolerates a fair amount of blur, but our fine-grained DCT
+        // coefficient comparison needs sharper input than that) and BEFORE
+        // the expensive homography warp + DCT extraction, so a confirmed
+        // blurry/shaking frame is rejected cheaply without wasted work.
+        const gray = toGrayscale(cropped.data, CROP_SIZE, CROP_SIZE);
+        const quality = assessFrameQuality(gray, CROP_SIZE, CROP_SIZE, previousGrayRef.current, DEFAULT_QUALITY_THRESHOLDS);
+        previousGrayRef.current = gray;
+        setLastQuality(quality);
+
+        if (!quality.accepted) {
+          setStatus('found-blurry');
+          setRejectedFrames((n) => n + 1);
+          rafRef.current = requestAnimationFrame(tick);
+          return;
+        }
+
         setStatus('found-qr');
         setFlash(true);
         if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
@@ -206,7 +227,11 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
               key={corner}
               className={[
                 'absolute w-6 h-6 border-red-500 transition-colors',
-                status === 'found-qr' || status === 'decoded' ? 'border-green-500' : 'border-red-500',
+                status === 'found-qr' || status === 'decoded'
+                  ? 'border-green-500'
+                  : status === 'found-blurry'
+                    ? 'border-amber-500'
+                    : 'border-red-500',
                 corner === 'top-left' && 'top-0 left-0 border-t-2 border-l-2',
                 corner === 'top-right' && 'top-0 right-0 border-t-2 border-r-2',
                 corner === 'bottom-left' && 'bottom-0 left-0 border-b-2 border-l-2',
@@ -223,6 +248,7 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
         <div className="absolute top-2 left-2 px-2 py-1 rounded text-xs font-medium bg-black/70 text-white">
           {status === 'starting' && 'Starting camera…'}
           {status === 'searching' && 'Align marker within the brackets…'}
+          {status === 'found-blurry' && 'Hold steady — image too blurry/shaky…'}
           {status === 'found-qr' && mode === 'decode' && 'QR found — reading…'}
           {status === 'found-qr' && mode === 'ber' && 'QR found — measuring BER…'}
           {status === 'found-invalid' && 'QR read, but no valid payload — reading…'}
@@ -237,6 +263,14 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
         <p className="text-xs text-neutral-500 mb-1">Aligned/cropped region the decoder is reading:</p>
         <canvas ref={warpCanvasRef} className="border border-neutral-800 rounded w-40 h-40" />
       </div>
+
+      {lastQuality && (
+        <p className="text-[11px] text-neutral-600 font-mono">
+          sharpness={lastQuality.sharpness.toFixed(1)} (min {DEFAULT_QUALITY_THRESHOLDS.minSharpness}) ·
+          motion={lastQuality.motion?.toFixed(1) ?? '—'} (max {DEFAULT_QUALITY_THRESHOLDS.maxMotion}) ·
+          rejected frames: {rejectedFrames}
+        </p>
+      )}
 
       {mode === 'decode' && invalidAttempts >= 5 && (
         <div className="border border-red-900/50 rounded p-3 bg-red-950/30 text-sm text-red-300">
