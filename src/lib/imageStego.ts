@@ -236,6 +236,60 @@ export function extractRawBits(
   return { rxBits };
 }
 
+export interface CoeffDifferenceReport {
+  averageDifference: number;
+  minDifference: number;
+  maxDifference: number;
+  blocksCompared: number;
+}
+
+/**
+ * Average |F(coeff1) - F(coeff2)| across all 1024 canonical blocks, for a
+ * given coefficient pair. This is a print/scan calibration diagnostic, not
+ * a decode-correctness check: it measures how much raw coefficient
+ * separation actually survives in the physical image regardless of what
+ * bit each block was "supposed" to encode, which is exactly the kind of
+ * printer/scanner margin question this metric is meant to answer - a
+ * higher average means more headroom before noise flips a block's bit.
+ */
+export function computeAvgCoeffDifference(input: RgbaImage, coeff1: CoeffPos, coeff2: CoeffPos): CoeffDifferenceReport {
+  const { R, G, B } = splitChannels(input);
+  const R256 = resizeBilinear(R, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
+  const G256 = resizeBilinear(G, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
+  const B256 = resizeBilinear(B, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
+  const { Y } = rgbToYCbCr(R256, G256, B256);
+
+  let sum = 0;
+  let min = Infinity;
+  let max = -Infinity;
+
+  for (let blockIdx = 0; blockIdx < TOTAL_BLOCKS; blockIdx++) {
+    const blockRow = Math.floor(blockIdx / BLOCK_COUNT_PER_SIDE);
+    const blockCol = blockIdx % BLOCK_COUNT_PER_SIDE;
+    const by = blockRow * 8;
+    const bx = blockCol * 8;
+
+    const block: Block8 = makeBlock();
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        block[y][x] = Y[(by + y) * CANONICAL_SIZE + (bx + x)];
+      }
+    }
+    const F = dct8x8(block);
+    const diff = Math.abs(F[coeff1.u][coeff1.v] - F[coeff2.u][coeff2.v]);
+    sum += diff;
+    if (diff < min) min = diff;
+    if (diff > max) max = diff;
+  }
+
+  return {
+    averageDifference: sum / TOTAL_BLOCKS,
+    minDifference: min,
+    maxDifference: max,
+    blocksCompared: TOTAL_BLOCKS,
+  };
+}
+
 
 /** Resolve a final decode result from already-extracted raw bits (avoids re-running DCT extraction). */
 export function resolveFromRawBits(rxBits: number[], seed: number, codec: CodecKind = 'bch'): DecodeResult {

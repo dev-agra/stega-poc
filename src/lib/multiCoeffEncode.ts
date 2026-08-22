@@ -9,8 +9,10 @@ import {
   DEFAULT_SEED,
   splitChannels,
   mergeChannels,
+  computeAvgCoeffDifference,
   type RgbaImage,
   type DecodeResult,
+  type CoeffDifferenceReport,
 } from './imageStego';
 
 export interface CoeffPair {
@@ -174,4 +176,18 @@ export function decodeImageMultiCoeff(input: RgbaImage, opts: MultiCoeffDecodeOp
   }
 
   return resolveRxBits(rxBits, seed);
+}
+
+export interface PerPairCoeffDifference extends CoeffDifferenceReport {
+  coeff1: CoeffPos;
+  coeff2: CoeffPos;
+}
+
+/** Same average-coefficient-difference diagnostic, computed per pair for multi-coeff mode. */
+export function computeAvgCoeffDifferencesMulti(input: RgbaImage, coeffPairs: CoeffPair[]): PerPairCoeffDifference[] {
+  return coeffPairs.map(({ coeff1, coeff2 }) => ({
+    coeff1,
+    coeff2,
+    ...computeAvgCoeffDifference(input, coeff1, coeff2),
+  }));
 }

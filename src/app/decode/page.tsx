@@ -1,8 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { decodeImage, extractRawBits, DEFAULT_SEED, DEFAULT_SECRET, DEFAULT_COEFF_1, DEFAULT_COEFF_2, type DecodeResult } from '@/lib/imageStego';
-import { decodeImageMultiCoeff, type CoeffPair } from '@/lib/multiCoeffEncode';
+import { decodeImage, extractRawBits, computeAvgCoeffDifference, DEFAULT_SEED, DEFAULT_SECRET, DEFAULT_COEFF_1, DEFAULT_COEFF_2, type DecodeResult, type CoeffDifferenceReport } from '@/lib/imageStego';
+import { decodeImageMultiCoeff, computeAvgCoeffDifferencesMulti, type CoeffPair, type PerPairCoeffDifference } from '@/lib/multiCoeffEncode';
 import { computeBerReport, type BerReport } from '@/lib/ber';
 import { loadImageFileNative, imageToRgbaNative } from '@/lib/canvasUtils';
 import CoeffGridSelector from '@/components/CoeffGridSelector';
@@ -25,11 +25,15 @@ export default function DecodePage() {
   const [result, setResult] = useState<DecodeResult | null>(null);
   const [scannedQrText, setScannedQrText] = useState<string | null>(null);
   const [berReport, setBerReport] = useState<BerReport | null>(null);
+  const [coeffDiff, setCoeffDiff] = useState<CoeffDifferenceReport | null>(null);
+  const [coeffDiffMulti, setCoeffDiffMulti] = useState<PerPairCoeffDifference[] | null>(null);
 
   async function handleFile(file: File) {
     setError(null);
     setResult(null);
     setBerReport(null);
+    setCoeffDiff(null);
+    setCoeffDiffMulti(null);
 
     let useCoeff1 = coeff1;
     let useCoeff2 = coeff2;
@@ -70,11 +74,13 @@ export default function DecodePage() {
         setResult(dec);
         // BER diagnostic isn't wired for multi-coeff extraction yet (would
         // need a matching multi-pair reference regeneration) - skip for now.
+        setCoeffDiffMulti(computeAvgCoeffDifferencesMulti(rgba, pairs));
       } else {
         const dec = decodeImage(rgba, { seed: DEFAULT_SEED, coeff1: useCoeff1, coeff2: useCoeff2 });
         setResult(dec);
         const { rxBits } = extractRawBits(rgba, { seed: DEFAULT_SEED, coeff1: useCoeff1, coeff2: useCoeff2 });
         setBerReport(computeBerReport(DEFAULT_SECRET, DEFAULT_SEED, rxBits));
+        setCoeffDiff(computeAvgCoeffDifference(rgba, useCoeff1, useCoeff2));
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -122,7 +128,7 @@ export default function DecodePage() {
 
         {paramsLocked && (
           <button
-            onClick={() => { setMode('unset'); setResult(null); setError(null); setBerReport(null); }}
+            onClick={() => { setMode('unset'); setResult(null); setError(null); setBerReport(null); setCoeffDiff(null); setCoeffDiffMulti(null); }}
             className="text-xs text-neutral-400 underline hover:text-red-400"
           >
             ← edit parameters
@@ -237,10 +243,54 @@ export default function DecodePage() {
       {berReport && (
         <section className="border border-neutral-800 rounded-lg p-6 bg-neutral-950">
           <h2 className="text-sm font-semibold text-neutral-200 mb-3">Bit-Level Diagnostics (1024-block layer)</h2>
-          <p className="text-xs text-neutral-500">BER (against fixed secret {DEFAULT_SECRET})</p>
-          <p className="text-2xl font-mono text-red-400">{(berReport.ber * 100).toFixed(2)}%</p>
-          <p className="text-xs text-neutral-500 mt-3">
-            {berReport.mismatches} mismatches out of {berReport.bitsCompared} embedded bits compared.
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-xs text-neutral-500">BER (against fixed secret {DEFAULT_SECRET})</p>
+              <p className="text-2xl font-mono text-red-400">{(berReport.ber * 100).toFixed(2)}%</p>
+              <p className="text-[11px] text-neutral-500 mt-1">
+                {berReport.mismatches} mismatches out of {berReport.bitsCompared} embedded bits.
+              </p>
+            </div>
+            {coeffDiff && (
+              <div>
+                <p className="text-xs text-neutral-500">Average coefficient difference</p>
+                <p className="text-2xl font-mono text-red-400">{coeffDiff.averageDifference.toFixed(2)}</p>
+                <p className="text-[11px] text-neutral-500 mt-1">
+                  min {coeffDiff.minDifference.toFixed(2)} · max {coeffDiff.maxDifference.toFixed(2)} across{' '}
+                  {coeffDiff.blocksCompared} blocks.
+                </p>
+              </div>
+            )}
+          </div>
+          <p className="text-[11px] text-neutral-600 mt-3 leading-relaxed">
+            Average coefficient difference is |F(coeff1) − F(coeff2)| averaged across all 1024 blocks,
+            independent of whether decode succeeds — useful for tuning strength/coefficient choice per
+            printer or camera: a higher value means more surviving separation margin before noise flips
+            a block&apos;s bit.
+          </p>
+        </section>
+      )}
+
+      {coeffDiffMulti && (
+        <section className="border border-neutral-800 rounded-lg p-6 bg-neutral-950">
+          <h2 className="text-sm font-semibold text-neutral-200 mb-3">Average Coefficient Difference (per pair)</h2>
+          <div className="space-y-2">
+            {coeffDiffMulti.map((r, i) => (
+              <div key={i} className="flex items-center justify-between border border-neutral-800 rounded px-3 py-2">
+                <span className="text-sm font-mono text-neutral-300">
+                  ({r.coeff1.u},{r.coeff1.v}) vs ({r.coeff2.u},{r.coeff2.v})
+                </span>
+                <span className="text-sm font-mono text-red-400">
+                  avg {r.averageDifference.toFixed(2)}{' '}
+                  <span className="text-neutral-500">(min {r.minDifference.toFixed(2)} · max {r.maxDifference.toFixed(2)})</span>
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="text-[11px] text-neutral-600 mt-3 leading-relaxed">
+            Shown per pair since different coefficient positions typically survive print/scan
+            degradation differently — useful for spotting which of your selected pairs has the least
+            margin and is the weakest link.
           </p>
         </section>
       )}

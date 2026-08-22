@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
 import { warpQuadToSquare } from '@/lib/homography';
-import { extractRawBits, resolveFromRawBits, DEFAULT_SEED, DEFAULT_SECRET, type DecodeOptions, type DecodeResult } from '@/lib/imageStego';
+import { extractRawBits, resolveFromRawBits, computeAvgCoeffDifference, DEFAULT_SEED, DEFAULT_SECRET, type DecodeOptions, type DecodeResult, type CoeffDifferenceReport } from '@/lib/imageStego';
 import { computeBerReport, type BerReport } from '@/lib/ber';
 import { toGrayscale, assessFrameQuality, DEFAULT_QUALITY_THRESHOLDS, type FrameQuality } from '@/lib/frameQuality';
 
@@ -43,6 +43,7 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
   const [currentBer, setCurrentBer] = useState<BerReport | null>(null);
   const [lowestBer, setLowestBer] = useState<BerReport | null>(null);
   const [framesAnalyzed, setFramesAnalyzed] = useState(0);
+  const [currentCoeffDiff, setCurrentCoeffDiff] = useState<CoeffDifferenceReport | null>(null);
 
   const rafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -52,6 +53,7 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
     setLowestBer(null);
     setFramesAnalyzed(0);
     setCurrentBer(null);
+    setCurrentCoeffDiff(null);
   }
 
   useEffect(() => {
@@ -188,10 +190,17 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
           setCurrentBer(report);
           setFramesAnalyzed((n) => n + 1);
           setLowestBer((prev) => (prev === null || report.ber < prev.ber ? report : prev));
+
+          if (decodeOpts.coeff1 && decodeOpts.coeff2) {
+            setCurrentCoeffDiff(computeAvgCoeffDifference(warped, decodeOpts.coeff1, decodeOpts.coeff2));
+          }
         }
       } else {
         setStatus('searching');
-        if (mode === 'ber') setCurrentBer(null);
+        if (mode === 'ber') {
+          setCurrentBer(null);
+          setCurrentCoeffDiff(null);
+        }
       }
 
       rafRef.current = requestAnimationFrame(tick);
@@ -293,9 +302,17 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
           <div>
             <p className="text-xs font-semibold text-neutral-200 mb-2">This frame</p>
             {currentBer ? (
-              <div>
-                <p className="text-xs text-neutral-500">BER</p>
-                <p className="text-xl font-mono text-red-400">{(currentBer.ber * 100).toFixed(2)}%</p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <p className="text-xs text-neutral-500">BER</p>
+                  <p className="text-xl font-mono text-red-400">{(currentBer.ber * 100).toFixed(2)}%</p>
+                </div>
+                {currentCoeffDiff && (
+                  <div>
+                    <p className="text-xs text-neutral-500">Avg coeff difference</p>
+                    <p className="text-xl font-mono text-red-400">{currentCoeffDiff.averageDifference.toFixed(2)}</p>
+                  </div>
+                )}
               </div>
             ) : (
               <p className="text-xs text-neutral-500">No marker in frame right now.</p>
