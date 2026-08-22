@@ -2,17 +2,22 @@
 
 import { useState } from 'react';
 import { decodeImage, extractRawBits, DEFAULT_SEED, DEFAULT_SECRET, DEFAULT_COEFF_1, DEFAULT_COEFF_2, type DecodeResult } from '@/lib/imageStego';
+import { decodeImageMultiCoeff, type CoeffPair } from '@/lib/multiCoeffEncode';
 import { computeBerReport, type BerReport } from '@/lib/ber';
 import { loadImageFileNative, imageToRgbaNative } from '@/lib/canvasUtils';
 import CoeffGridSelector from '@/components/CoeffGridSelector';
+import MultiCoeffSelector from '@/components/MultiCoeffSelector';
 import CameraScan from '@/components/CameraScan';
 import type { CoeffPos } from '@/lib/dct';
 
 type Mode = 'unset' | 'upload' | 'scan-decode' | 'scan-ber';
+type CoeffInputMode = 'single' | 'multicoeff';
 
 export default function DecodePage() {
+  const [coeffInputMode, setCoeffInputMode] = useState<CoeffInputMode>('single');
   const [coeff1, setCoeff1] = useState<CoeffPos>(DEFAULT_COEFF_1);
   const [coeff2, setCoeff2] = useState<CoeffPos>(DEFAULT_COEFF_2);
+  const [mcPairs, setMcPairs] = useState<CoeffPair[]>([]);
   const [mode, setMode] = useState<Mode>('unset');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -28,30 +33,49 @@ export default function DecodePage() {
 
     let useCoeff1 = coeff1;
     let useCoeff2 = coeff2;
-    // Filenames from this app's encoder still carry the coefficient pair
-    // (secret/seed are fixed constants now, so no longer part of the match).
-    const match = file.name.match(/c1-(\d)x(\d)_c2-(\d)x(\d)/);
-    if (match) {
-      useCoeff1 = { u: Number(match[1]), v: Number(match[2]) };
-      useCoeff2 = { u: Number(match[3]), v: Number(match[4]) };
-      setCoeff1(useCoeff1);
-      setCoeff2(useCoeff2);
+    let useMcPairs: CoeffPair[] | null = null;
+
+    // Try the multi-coeff filename pattern first: stego_multicoeff_2x3-3x2_0x1-1x0_..._str-N.png
+    const mcMatches = [...file.name.matchAll(/(\d)x(\d)-(\d)x(\d)/g)];
+    if (file.name.includes('multicoeff') && mcMatches.length > 0) {
+      useMcPairs = mcMatches.map((m) => ({
+        coeff1: { u: Number(m[1]), v: Number(m[2]) },
+        coeff2: { u: Number(m[3]), v: Number(m[4]) },
+      }));
+      setMcPairs(useMcPairs);
+      setCoeffInputMode('multicoeff');
       setAutoDetected(true);
     } else {
-      setAutoDetected(false);
+      const match = file.name.match(/c1-(\d)x(\d)_c2-(\d)x(\d)/);
+      if (match) {
+        useCoeff1 = { u: Number(match[1]), v: Number(match[2]) };
+        useCoeff2 = { u: Number(match[3]), v: Number(match[4]) };
+        setCoeff1(useCoeff1);
+        setCoeff2(useCoeff2);
+        setCoeffInputMode('single');
+        setAutoDetected(true);
+      } else {
+        setAutoDetected(false);
+      }
     }
 
     setBusy(true);
     try {
       const { img, width, height } = await loadImageFileNative(file);
       const rgba = imageToRgbaNative(img, width, height);
-      const dec = decodeImage(rgba, { seed: DEFAULT_SEED, coeff1: useCoeff1, coeff2: useCoeff2 });
-      setResult(dec);
 
-      // BER diagnostic: regenerate the reference bit-stream for the fixed
-      // app-wide secret and compare against the raw extraction.
-      const { rxBits } = extractRawBits(rgba, { seed: DEFAULT_SEED, coeff1: useCoeff1, coeff2: useCoeff2 });
-      setBerReport(computeBerReport(DEFAULT_SECRET, DEFAULT_SEED, rxBits));
+      if (useMcPairs || coeffInputMode === 'multicoeff') {
+        const pairs = useMcPairs ?? mcPairs;
+        const dec = decodeImageMultiCoeff(rgba, { seed: DEFAULT_SEED, coeffPairs: pairs });
+        setResult(dec);
+        // BER diagnostic isn't wired for multi-coeff extraction yet (would
+        // need a matching multi-pair reference regeneration) - skip for now.
+      } else {
+        const dec = decodeImage(rgba, { seed: DEFAULT_SEED, coeff1: useCoeff1, coeff2: useCoeff2 });
+        setResult(dec);
+        const { rxBits } = extractRawBits(rgba, { seed: DEFAULT_SEED, coeff1: useCoeff1, coeff2: useCoeff2 });
+        setBerReport(computeBerReport(DEFAULT_SECRET, DEFAULT_SEED, rxBits));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -74,7 +98,26 @@ export default function DecodePage() {
 
       <section className="space-y-5 border border-neutral-800 rounded-lg p-6 bg-neutral-950">
         <fieldset disabled={paramsLocked} className={paramsLocked ? 'opacity-50' : ''}>
-          <CoeffGridSelector coeff1={coeff1} coeff2={coeff2} onChange={(c1, c2) => { setCoeff1(c1); setCoeff2(c2); }} />
+          <div className="flex gap-2 mb-4">
+            <button
+              onClick={() => setCoeffInputMode('single')}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${coeffInputMode === 'single' ? 'bg-red-600 text-white' : 'border border-neutral-700 text-neutral-400'}`}
+            >
+              Single pair
+            </button>
+            <button
+              onClick={() => setCoeffInputMode('multicoeff')}
+              className={`px-3 py-1 rounded text-xs font-medium transition-colors ${coeffInputMode === 'multicoeff' ? 'bg-red-600 text-white' : 'border border-neutral-700 text-neutral-400'}`}
+            >
+              Multi-coeff (1-pass encoded)
+            </button>
+          </div>
+
+          {coeffInputMode === 'single' ? (
+            <CoeffGridSelector coeff1={coeff1} coeff2={coeff2} onChange={(c1, c2) => { setCoeff1(c1); setCoeff2(c2); }} />
+          ) : (
+            <MultiCoeffSelector layers={mcPairs} onChange={setMcPairs} />
+          )}
         </fieldset>
 
         {paramsLocked && (
@@ -97,13 +140,15 @@ export default function DecodePage() {
             <div className="flex gap-3">
               <button
                 onClick={() => setMode('scan-decode')}
-                className="flex-1 px-4 py-3 rounded border border-neutral-700 text-neutral-100 font-medium hover:border-red-500 transition-colors"
+                disabled={coeffInputMode === 'multicoeff'}
+                className="flex-1 px-4 py-3 rounded border border-neutral-700 text-neutral-100 font-medium hover:border-red-500 transition-colors disabled:opacity-30 disabled:hover:border-neutral-700"
               >
                 Scan (Decode)
               </button>
               <button
                 onClick={() => setMode('scan-ber')}
-                className="flex-1 px-4 py-3 rounded border border-neutral-700 text-neutral-100 font-medium hover:border-red-500 transition-colors"
+                disabled={coeffInputMode === 'multicoeff'}
+                className="flex-1 px-4 py-3 rounded border border-neutral-700 text-neutral-100 font-medium hover:border-red-500 transition-colors disabled:opacity-30 disabled:hover:border-neutral-700"
               >
                 Scan (BER Analysis)
               </button>
@@ -113,6 +158,11 @@ export default function DecodePage() {
               secret, no BER computed. <span className="text-neutral-300 font-medium">Scan (BER
               Analysis)</span> never decodes — it continuously tracks BER against the fixed secret and
               shows the lowest score reached this session.
+              {coeffInputMode === 'multicoeff' && (
+                <span className="block mt-1 text-amber-500">
+                  Scan modes aren&apos;t wired up for multi-coeff decoding yet — Upload only for now.
+                </span>
+              )}
             </p>
           </div>
         )}

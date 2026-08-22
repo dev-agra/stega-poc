@@ -48,7 +48,7 @@ export interface RgbaImage {
   data: Uint8ClampedArray; // RGBA, length = width*height*4
 }
 
-function splitChannels(img: RgbaImage): { R: Float64Array; G: Float64Array; B: Float64Array; A: Float64Array } {
+export function splitChannels(img: RgbaImage): { R: Float64Array; G: Float64Array; B: Float64Array; A: Float64Array } {
   const n = img.width * img.height;
   const R = new Float64Array(n);
   const G = new Float64Array(n);
@@ -63,7 +63,7 @@ function splitChannels(img: RgbaImage): { R: Float64Array; G: Float64Array; B: F
   return { R, G, B, A };
 }
 
-function mergeChannels(R: Float64Array, G: Float64Array, B: Float64Array, A: Float64Array, width: number, height: number): RgbaImage {
+export function mergeChannels(R: Float64Array, G: Float64Array, B: Float64Array, A: Float64Array, width: number, height: number): RgbaImage {
   const data = new Uint8ClampedArray(width * height * 4);
   for (let i = 0; i < width * height; i++) {
     data[i * 4] = R[i];
