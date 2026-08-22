@@ -10,9 +10,11 @@ import {
   splitChannels,
   mergeChannels,
   computeAvgCoeffDifference,
+  computeAvgCoeffDifferencePenalized,
   type RgbaImage,
   type DecodeResult,
   type CoeffDifferenceReport,
+  type PenalizedCoeffDifferenceReport,
 } from './imageStego';
 
 export interface CoeffPair {
@@ -189,5 +191,27 @@ export function computeAvgCoeffDifferencesMulti(input: RgbaImage, coeffPairs: Co
     coeff1,
     coeff2,
     ...computeAvgCoeffDifference(input, coeff1, coeff2),
+  }));
+}
+
+export interface PerPairPenalizedCoeffDifference extends PenalizedCoeffDifferenceReport {
+  coeff1: CoeffPos;
+  coeff2: CoeffPos;
+}
+
+/**
+ * Penalized variant (zero-on-flip) for multi-coeff mode, per pair. Each
+ * pair is checked against the SAME shared reference bit stream, since all
+ * pairs within a multi-coeff block encode the same underlying bit.
+ */
+export function computeAvgCoeffDifferencesPenalizedMulti(
+  input: RgbaImage,
+  coeffPairs: CoeffPair[],
+  referenceBits: number[]
+): PerPairPenalizedCoeffDifference[] {
+  return coeffPairs.map(({ coeff1, coeff2 }) => ({
+    coeff1,
+    coeff2,
+    ...computeAvgCoeffDifferencePenalized(input, coeff1, coeff2, referenceBits),
   }));
 }

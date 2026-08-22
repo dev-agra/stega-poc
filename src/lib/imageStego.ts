@@ -290,6 +290,85 @@ export function computeAvgCoeffDifference(input: RgbaImage, coeff1: CoeffPos, co
   };
 }
 
+export interface PenalizedCoeffDifferenceReport extends CoeffDifferenceReport {
+  flippedBlocks: number; // count of blocks zeroed out due to a broken/flipped relationship
+  rawAverageDifference: number; // the un-penalized average, for comparison
+}
+
+/**
+ * Same average as computeAvgCoeffDifference, but any block whose extracted
+ * bit doesn't match the expected reference bit (regenerated from
+ * secret+seed, same as the BER diagnostic) has its contribution zeroed out
+ * instead of counted at full magnitude - still divided by the full 1024,
+ * nothing is discarded from the denominator. This directly answers "does a
+ * broken relationship still count as a big number" - no, it counts as 0,
+ * so a high penalized average is actually trustworthy signal, unlike the
+ * raw version which can look healthy even with real decode errors mixed in
+ * (a large gap pointing the WRONG way still averages in at full magnitude
+ * in the raw metric).
+ *
+ * Blocks beyond the reference sequence's length (the ~16 spare/unembedded
+ * blocks past ~1008) have no "expected" bit to check against, so their raw
+ * |diff| is used as-is - there's no correctness concept for them.
+ */
+export function computeAvgCoeffDifferencePenalized(
+  input: RgbaImage,
+  coeff1: CoeffPos,
+  coeff2: CoeffPos,
+  referenceBits: number[]
+): PenalizedCoeffDifferenceReport {
+  const { R, G, B } = splitChannels(input);
+  const R256 = resizeBilinear(R, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
+  const G256 = resizeBilinear(G, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
+  const B256 = resizeBilinear(B, input.width, input.height, CANONICAL_SIZE, CANONICAL_SIZE);
+  const { Y } = rgbToYCbCr(R256, G256, B256);
+
+  let penalizedSum = 0;
+  let rawSum = 0;
+  let min = Infinity;
+  let max = -Infinity;
+  let flippedBlocks = 0;
+
+  for (let blockIdx = 0; blockIdx < TOTAL_BLOCKS; blockIdx++) {
+    const blockRow = Math.floor(blockIdx / BLOCK_COUNT_PER_SIDE);
+    const blockCol = blockIdx % BLOCK_COUNT_PER_SIDE;
+    const by = blockRow * 8;
+    const bx = blockCol * 8;
+
+    const block: Block8 = makeBlock();
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        block[y][x] = Y[(by + y) * CANONICAL_SIZE + (bx + x)];
+      }
+    }
+    const F = dct8x8(block);
+    const diff = Math.abs(F[coeff1.u][coeff1.v] - F[coeff2.u][coeff2.v]);
+    rawSum += diff;
+
+    let contribution = diff;
+    if (blockIdx < referenceBits.length) {
+      const extractedBit = extractBitFromCoeffs(F, coeff1, coeff2);
+      if (extractedBit !== referenceBits[blockIdx]) {
+        contribution = 0;
+        flippedBlocks++;
+      }
+    }
+    penalizedSum += contribution;
+
+    if (diff < min) min = diff;
+    if (diff > max) max = diff;
+  }
+
+  return {
+    averageDifference: penalizedSum / TOTAL_BLOCKS,
+    rawAverageDifference: rawSum / TOTAL_BLOCKS,
+    minDifference: min,
+    maxDifference: max,
+    blocksCompared: TOTAL_BLOCKS,
+    flippedBlocks,
+  };
+}
+
 
 /** Resolve a final decode result from already-extracted raw bits (avoids re-running DCT extraction). */
 export function resolveFromRawBits(rxBits: number[], seed: number, codec: CodecKind = 'bch'): DecodeResult {

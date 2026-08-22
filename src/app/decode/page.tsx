@@ -1,8 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { decodeImage, extractRawBits, computeAvgCoeffDifference, DEFAULT_SEED, DEFAULT_SECRET, DEFAULT_COEFF_1, DEFAULT_COEFF_2, type DecodeResult, type CoeffDifferenceReport } from '@/lib/imageStego';
-import { decodeImageMultiCoeff, computeAvgCoeffDifferencesMulti, type CoeffPair, type PerPairCoeffDifference } from '@/lib/multiCoeffEncode';
+import { decodeImage, extractRawBits, computeAvgCoeffDifferencePenalized, DEFAULT_SEED, DEFAULT_SECRET, DEFAULT_COEFF_1, DEFAULT_COEFF_2, type DecodeResult, type PenalizedCoeffDifferenceReport } from '@/lib/imageStego';
+import { decodeImageMultiCoeff, computeAvgCoeffDifferencesPenalizedMulti, type CoeffPair, type PerPairPenalizedCoeffDifference } from '@/lib/multiCoeffEncode';
+import { prepareTxBits } from '@/lib/payloadCodec';
 import { computeBerReport, type BerReport } from '@/lib/ber';
 import { loadImageFileNative, imageToRgbaNative } from '@/lib/canvasUtils';
 import CoeffGridSelector from '@/components/CoeffGridSelector';
@@ -25,8 +26,8 @@ export default function DecodePage() {
   const [result, setResult] = useState<DecodeResult | null>(null);
   const [scannedQrText, setScannedQrText] = useState<string | null>(null);
   const [berReport, setBerReport] = useState<BerReport | null>(null);
-  const [coeffDiff, setCoeffDiff] = useState<CoeffDifferenceReport | null>(null);
-  const [coeffDiffMulti, setCoeffDiffMulti] = useState<PerPairCoeffDifference[] | null>(null);
+  const [coeffDiff, setCoeffDiff] = useState<PenalizedCoeffDifferenceReport | null>(null);
+  const [coeffDiffMulti, setCoeffDiffMulti] = useState<PerPairPenalizedCoeffDifference[] | null>(null);
 
   async function handleFile(file: File) {
     setError(null);
@@ -72,15 +73,15 @@ export default function DecodePage() {
         const pairs = useMcPairs ?? mcPairs;
         const dec = decodeImageMultiCoeff(rgba, { seed: DEFAULT_SEED, coeffPairs: pairs });
         setResult(dec);
-        // BER diagnostic isn't wired for multi-coeff extraction yet (would
-        // need a matching multi-pair reference regeneration) - skip for now.
-        setCoeffDiffMulti(computeAvgCoeffDifferencesMulti(rgba, pairs));
+        const { txBits } = prepareTxBits(DEFAULT_SECRET, 1024, DEFAULT_SEED);
+        setCoeffDiffMulti(computeAvgCoeffDifferencesPenalizedMulti(rgba, pairs, txBits));
       } else {
         const dec = decodeImage(rgba, { seed: DEFAULT_SEED, coeff1: useCoeff1, coeff2: useCoeff2 });
         setResult(dec);
         const { rxBits } = extractRawBits(rgba, { seed: DEFAULT_SEED, coeff1: useCoeff1, coeff2: useCoeff2 });
         setBerReport(computeBerReport(DEFAULT_SECRET, DEFAULT_SEED, rxBits));
-        setCoeffDiff(computeAvgCoeffDifference(rgba, useCoeff1, useCoeff2));
+        const { txBits } = prepareTxBits(DEFAULT_SECRET, 1024, DEFAULT_SEED);
+        setCoeffDiff(computeAvgCoeffDifferencePenalized(rgba, useCoeff1, useCoeff2, txBits));
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -253,27 +254,31 @@ export default function DecodePage() {
             </div>
             {coeffDiff && (
               <div>
-                <p className="text-xs text-neutral-500">Average coefficient difference</p>
+                <p className="text-xs text-neutral-500">Average coefficient difference (penalized)</p>
                 <p className="text-2xl font-mono text-red-400">{coeffDiff.averageDifference.toFixed(2)}</p>
                 <p className="text-[11px] text-neutral-500 mt-1">
-                  min {coeffDiff.minDifference.toFixed(2)} · max {coeffDiff.maxDifference.toFixed(2)} across{' '}
-                  {coeffDiff.blocksCompared} blocks.
+                  raw (unpenalized): {coeffDiff.rawAverageDifference.toFixed(2)} · {coeffDiff.flippedBlocks} flipped
+                  block{coeffDiff.flippedBlocks === 1 ? '' : 's'} zeroed · min {coeffDiff.minDifference.toFixed(2)} ·
+                  max {coeffDiff.maxDifference.toFixed(2)}
                 </p>
               </div>
             )}
           </div>
           <p className="text-[11px] text-neutral-600 mt-3 leading-relaxed">
-            Average coefficient difference is |F(coeff1) − F(coeff2)| averaged across all 1024 blocks,
-            independent of whether decode succeeds — useful for tuning strength/coefficient choice per
-            printer or camera: a higher value means more surviving separation margin before noise flips
-            a block&apos;s bit.
+            Average coefficient difference is |F(coeff1) − F(coeff2)| averaged across all 1024 blocks.
+            Blocks whose extracted bit doesn&apos;t match the expected reference bit are counted as 0
+            (penalized) rather than at full magnitude — a broken relationship that&apos;s still
+            large-but-pointing-the-wrong-way no longer inflates the average. Useful for tuning
+            strength/coefficient choice per printer or camera: a higher penalized value means more
+            genuinely-correct separation margin survived, not just raw signal strength regardless of
+            direction.
           </p>
         </section>
       )}
 
       {coeffDiffMulti && (
         <section className="border border-neutral-800 rounded-lg p-6 bg-neutral-950">
-          <h2 className="text-sm font-semibold text-neutral-200 mb-3">Average Coefficient Difference (per pair)</h2>
+          <h2 className="text-sm font-semibold text-neutral-200 mb-3">Average Coefficient Difference (per pair, penalized)</h2>
           <div className="space-y-2">
             {coeffDiffMulti.map((r, i) => (
               <div key={i} className="flex items-center justify-between border border-neutral-800 rounded px-3 py-2">
@@ -281,16 +286,19 @@ export default function DecodePage() {
                   ({r.coeff1.u},{r.coeff1.v}) vs ({r.coeff2.u},{r.coeff2.v})
                 </span>
                 <span className="text-sm font-mono text-red-400">
-                  avg {r.averageDifference.toFixed(2)}{' '}
-                  <span className="text-neutral-500">(min {r.minDifference.toFixed(2)} · max {r.maxDifference.toFixed(2)})</span>
+                  {r.averageDifference.toFixed(2)}{' '}
+                  <span className="text-neutral-500">
+                    (raw {r.rawAverageDifference.toFixed(2)} · {r.flippedBlocks} flipped)
+                  </span>
                 </span>
               </div>
             ))}
           </div>
           <p className="text-[11px] text-neutral-600 mt-3 leading-relaxed">
             Shown per pair since different coefficient positions typically survive print/scan
-            degradation differently — useful for spotting which of your selected pairs has the least
-            margin and is the weakest link.
+            degradation differently. Flipped blocks are zeroed rather than counted at full magnitude —
+            the pair with the biggest gap between its raw and penalized value is the one being hurt
+            most by real bit flips, not just noise.
           </p>
         </section>
       )}

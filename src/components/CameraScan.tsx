@@ -3,8 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import jsQR from 'jsqr';
 import { warpQuadToSquare } from '@/lib/homography';
-import { extractRawBits, resolveFromRawBits, computeAvgCoeffDifference, DEFAULT_SEED, DEFAULT_SECRET, type DecodeOptions, type DecodeResult, type CoeffDifferenceReport } from '@/lib/imageStego';
+import { extractRawBits, resolveFromRawBits, computeAvgCoeffDifferencePenalized, DEFAULT_SEED, DEFAULT_SECRET, type DecodeOptions, type DecodeResult, type PenalizedCoeffDifferenceReport } from '@/lib/imageStego';
 import { computeBerReport, type BerReport } from '@/lib/ber';
+import { prepareTxBits } from '@/lib/payloadCodec';
 import { toGrayscale, assessFrameQuality, DEFAULT_QUALITY_THRESHOLDS, type FrameQuality } from '@/lib/frameQuality';
 
 interface Props {
@@ -43,7 +44,7 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
   const [currentBer, setCurrentBer] = useState<BerReport | null>(null);
   const [lowestBer, setLowestBer] = useState<BerReport | null>(null);
   const [framesAnalyzed, setFramesAnalyzed] = useState(0);
-  const [currentCoeffDiff, setCurrentCoeffDiff] = useState<CoeffDifferenceReport | null>(null);
+  const [currentCoeffDiff, setCurrentCoeffDiff] = useState<PenalizedCoeffDifferenceReport | null>(null);
 
   const rafRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -192,7 +193,8 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
           setLowestBer((prev) => (prev === null || report.ber < prev.ber ? report : prev));
 
           if (decodeOpts.coeff1 && decodeOpts.coeff2) {
-            setCurrentCoeffDiff(computeAvgCoeffDifference(warped, decodeOpts.coeff1, decodeOpts.coeff2));
+            const { txBits } = prepareTxBits(DEFAULT_SECRET, 1024, seed);
+            setCurrentCoeffDiff(computeAvgCoeffDifferencePenalized(warped, decodeOpts.coeff1, decodeOpts.coeff2, txBits));
           }
         }
       } else {
@@ -309,8 +311,9 @@ export default function CameraScan({ mode, decodeOpts, onResult }: Props) {
                 </div>
                 {currentCoeffDiff && (
                   <div>
-                    <p className="text-xs text-neutral-500">Avg coeff difference</p>
+                    <p className="text-xs text-neutral-500">Avg coeff diff (penalized)</p>
                     <p className="text-xl font-mono text-red-400">{currentCoeffDiff.averageDifference.toFixed(2)}</p>
+                    <p className="text-[10px] text-neutral-600">{currentCoeffDiff.flippedBlocks} flipped</p>
                   </div>
                 )}
               </div>
